@@ -221,7 +221,10 @@ class Glosser:
                     head = tmpl.format(*[self.term(a, _ATOM) for a in args[:k]])
                     rest = args[k:]
                     if not rest:
-                        return head, _ATOM if not " " in head else 10
+                        if " " not in head:
+                            return head, _ATOM
+                        # "the real part of s" reads fine beside relations, not beside arithmetic
+                        return head, 60 if head.startswith("the ") else 10
                     return f"({head})(" + ", ".join(self.term(a) for a in rest) + ")", _ATOM
             if ident in self.locals and len(ident) <= 2:
                 return f"{ident}(" + ", ".join(self.term(a) for a in args) + ")", _ATOM
@@ -430,7 +433,10 @@ class Glosser:
                     if pos in s:
                         return s.replace(pos, neg, 1)
         if isinstance(n, Quant) and n.q == "∃":
-            return "there is no " + self._quant_prop(n)[len("there exists ") :] if self._quant_prop(n).startswith("there exists ") else f"it is not the case that {self.prop(n)}"
+            rest = self._quant_prop(n)[len("there exists ") :]
+            for art in ("a ", "an "):
+                rest = rest.removeprefix(art)
+            return "there is no " + rest if self._quant_prop(n).startswith("there exists ") else f"it is not the case that {self.prop(n)}"
         return f"it is not the case that {self.prop(n)}"
 
     def _quant_prop(self, n: Quant) -> str:

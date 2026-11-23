@@ -99,3 +99,15 @@ def test_unused_section_variables_are_dropped():
 
 def test_name_gloss():
     assert gloss_name("Nat.mul_le_mul_of_nonneg_left") == "Nat: mul ≤ mul — given nonnegative left"
+
+
+def test_riemann_hypothesis():
+    g = one(
+        "def RiemannHypothesis : Prop :=\n"
+        "  ∀ (s : ℂ) (_ : riemannZeta s = 0) (_ : ¬∃ n : ℕ, s = -2 * (n + 1)) (_ : s ≠ 1), s.re = 1 / 2\n"
+    )
+    assert g == (
+        "Definition RiemannHypothesis: RiemannHypothesis holds when for every complex number s, "
+        "if ζ(s) equals 0, there is no natural number n such that s equals -2 * (n + 1) and "
+        "s does not equal 1, then the real part of s equals 1 / 2."
+    )

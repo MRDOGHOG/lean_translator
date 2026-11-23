@@ -282,7 +282,7 @@ def _byte_col_cut(last_line: str, col: int, sig: str) -> int:
     return len(sig) - (len(last_line) - col)
 
 
-_MAX_BODY_TOKENS = 40
+_MAX_BODY_TOKENS = 120
 
 
 def _attach_tail(decl: Decl, tail: list[Token]) -> None:
