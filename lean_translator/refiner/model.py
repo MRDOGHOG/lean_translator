@@ -55,6 +55,11 @@ class Seq2Seq(nn.Module):
         )
         self.out = nn.Linear(cfg.d_model, cfg.vocab_size, bias=False)
         self.out.weight = self.embed.weight  # tied embeddings, as in Marian
+        # With tied weights the default N(0, 1) init gives huge initial logits;
+        # use the Transformer paper's d_model^-0.5 scale instead.
+        nn.init.normal_(self.embed.weight, mean=0.0, std=cfg.d_model ** -0.5)
+        with torch.no_grad():
+            self.embed.weight[PAD].zero_()
         self.scale = math.sqrt(cfg.d_model)
 
     def _emb(self, ids: torch.Tensor) -> torch.Tensor:
