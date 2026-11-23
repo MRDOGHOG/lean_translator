@@ -1,0 +1,20 @@
+[project]
+name = "lean-translator"
+version = "0.1.0"
+description = "Lightweight multi-stage Lean 4 -> English translator (rule-based glosser + small NMT transformer)"
+requires-python = ">=3.10"
+dependencies = []
+
+[project.optional-dependencies]
+refiner = ["torch>=2.0", "tokenizers>=0.15"]
+dev = ["pytest"]
+
+[project.scripts]
+lean-translator = "lean_translator.cli:main"
+
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+include = ["lean_translator*"]

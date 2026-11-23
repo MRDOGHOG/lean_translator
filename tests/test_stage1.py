@@ -1,0 +1,101 @@
+from lean_translator import translate
+from lean_translator.decls import extract_decls
+from lean_translator.gloss import gloss_name
+from lean_translator.lexer import tokenize
+from lean_translator.parser import Bin, Quant, Raw, parse
+
+
+def one(src: str) -> str:
+    out = translate(src)
+    assert len(out) == 1, out
+    return out[0]
+
+
+def test_lexer_decorated_operators():
+    texts = [t.text for t in tokenize("‖x‖₊ * A *ᵥ v (1 - ‖z‖)⁻¹ ∑' n, f n")]
+    assert "‖₊" in texts and "*ᵥ" in texts and "∑'" in texts
+    assert ")" in texts and "⁻¹" in texts  # brackets never absorb modifiers
+
+
+def test_lexer_keeps_docstrings_drops_comments():
+    toks = tokenize("/-- hello -/ -- comment\n/- block /- nested -/ -/ theorem")
+    assert [(t.kind, t.text) for t in toks] == [("doc", "hello"), ("ident", "theorem")]
+
+
+def test_parser_precedence():
+    n = parse(tokenize("a + b * c = d ∧ p ↔ q"))
+    assert isinstance(n, Bin) and n.op == "↔"
+    assert n.lhs.op == "∧" and n.lhs.lhs.op == "="
+
+
+def test_parser_binders():
+    n = parse(tokenize("∀ ε > 0, ∃ δ > 0, ∀ x, |x| < δ → |f x| < ε"))
+    assert isinstance(n, Quant) and n.binders[0].bound_op == ">"
+
+
+def test_parser_falls_back_to_raw():
+    assert isinstance(parse(tokenize("foo := by simp")), Raw)
+
+
+def test_decls_skip_proofs_and_track_variables():
+    src = """
+variable {G : Type*} [Group G]
+
+/-- doc -/
+theorem mul_inv (a : G) : a * a⁻¹ = 1 := by
+  simp
+  -- theorem fake : False := sorry  (inside a proof, must be ignored)
+
+lemma two : 1 + 1 = 2 := rfl
+"""
+    ds = extract_decls(src)
+    assert [d.name for d in ds] == ["mul_inv", "two"]
+    assert ds[0].doc == "doc"
+    assert len(ds[0].context) == 2
+
+
+def test_gloss_group_theorem():
+    g = one("variable {G : Type*} [Group G]\ntheorem mul_inv (a : G) : a * a⁻¹ = 1 := sorry")
+    assert g == "Theorem mul_inv: Let G be a group. Let a be an element of G. Then a * a⁻¹ equals 1."
+
+
+def test_gloss_hypotheses_predicates_negation():
+    g = one("theorem foo {n : ℕ} (h : 2 ≤ n) (np : ¬Nat.Prime n) : ∃ m, m ∣ n ∧ m ≠ 1 := sorry")
+    assert "Let n be a natural number." in g
+    assert "Assume that 2 is at most n and that n is not prime." in g
+    assert "there exists m such that m divides n and m does not equal 1" in g
+
+
+def test_gloss_quantifiers_with_types():
+    g = one("theorem t : ∀ a b : ℕ, a + b = b + a := sorry")
+    assert "for all natural numbers a and b, a + b equals b + a" in g
+
+
+def test_gloss_dot_notation():
+    g = one("theorem t {p : ℕ} (hp : p.Prime) : 2 ≤ p := sorry")
+    assert "Assume that p is prime." in g
+
+
+def test_gloss_big_operators():
+    g = one("theorem t (n : ℕ) : ∑ i ∈ Finset.range n, i = n * (n - 1) / 2 := sorry")
+    assert "the sum of i over i ∈ {0, …, n - 1}" in g
+
+
+def test_gloss_definition_body():
+    g = one("def double (n : ℕ) : ℕ := 2 * n")
+    assert g == "Definition double: Let n be a natural number. Define double(n) := 2 * n, which is a natural number."
+
+
+def test_gloss_class():
+    g = one("class Foo (α : Type*) extends Bar α where\n  op : α → α\n  op_self : ∀ a, op (op a) = a")
+    assert "is a bar, together with op, a function from α to α" in g
+    assert "the property (op_self) that for every a, op(op(a)) equals a" in g
+
+
+def test_unused_section_variables_are_dropped():
+    g = one("variable {α β : Type*} [Group α] [Ring β]\ntheorem t (a : α) : a = a := sorry")
+    assert "β" not in g and "ring" not in g
+
+
+def test_name_gloss():
+    assert gloss_name("Nat.mul_le_mul_of_nonneg_left") == "Nat: mul ≤ mul — given nonnegative left"

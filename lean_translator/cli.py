@@ -1,0 +1,153 @@
+"""Command-line entry point.
+
+    python -m lean_translator gloss  PATH...   [-o out.jsonl] [-j WORKERS]
+    python -m lean_translator gloss  -          (read Lean from stdin, print text)
+    python -m lean_translator pairs  PATH... -o pairs.jsonl   (training data for stage 2)
+    python -m lean_translator refine IN.jsonl -o OUT.jsonl --model ckpt.pt
+"""
+
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import sys
+import time
+from concurrent.futures import ProcessPoolExecutor
+from pathlib import Path
+
+from .decls import extract_decls
+from .gloss import gloss_decl
+
+
+def _iter_files(paths: list[str]) -> list[Path]:
+    out: list[Path] = []
+    for p in paths:
+        path = Path(p)
+        if path.is_dir():
+            out.extend(sorted(path.rglob("*.lean")))
+        else:
+            out.append(path)
+    return out
+
+
+def translate_source(src: str, file: str = "<input>") -> list[dict]:
+    rows = []
+    for d in extract_decls(src, file):
+        try:
+            rows.append(gloss_decl(d).to_dict())
+        except Exception as e:  # never let one weird declaration kill a run
+            rows.append({"name": d.full_name, "kind": d.kind, "file": file, "line": d.line,
+                         "lean": d.signature, "gloss": None, "error": repr(e), "doc": d.doc})
+    return rows
+
+
+def _work(path: str, root: str | None) -> tuple[list[dict], int]:
+    sys.setrecursionlimit(20000)
+    with open(path, encoding="utf-8", errors="replace") as f:
+        src = f.read()
+    rel = os.path.relpath(path, root) if root else path
+    return translate_source(src, rel), src.count("\n") + 1
+
+
+def _chunks(files: list[Path], size: int):
+    for i in range(0, len(files), size):
+        yield files[i : i + size]
+
+
+def _work_many(paths: list[str], root: str | None) -> tuple[list[dict], int]:
+    rows: list[dict] = []
+    lines = 0
+    for p in paths:
+        r, n = _work(p, root)
+        rows.extend(r)
+        lines += n
+    return rows, lines
+
+
+def run_gloss(args: argparse.Namespace) -> None:
+    if args.paths == ["-"]:
+        for row in translate_source(sys.stdin.read()):
+            print(row["gloss"] if row.get("gloss") else f"[failed: {row.get('error')}]")
+            print()
+        return
+    files = _iter_files(args.paths)
+    root = os.path.commonpath([str(p.parent) for p in files]) if files else None
+    t0 = time.perf_counter()
+    total_lines = 0
+    total_decls = 0
+    out = open(args.output, "w", encoding="utf-8") if args.output else sys.stdout
+    workers = args.jobs or os.cpu_count() or 1
+    batches = [[str(p) for p in b] for b in _chunks(files, 32)]
+    with ProcessPoolExecutor(max_workers=workers) as ex:
+        for rows, n in ex.map(_work_many, batches, [root] * len(batches)):
+            total_lines += n
+            total_decls += len(rows)
+            for row in rows:
+                if args.format == "text":
+                    out.write(f"{row['file']}:{row['line']}  {row.get('gloss')}\n")
+                else:
+                    out.write(json.dumps(row, ensure_ascii=False) + "\n")
+    dt = time.perf_counter() - t0
+    if out is not sys.stdout:
+        out.close()
+    print(
+        f"translated {total_decls:,} declarations from {len(files):,} files "
+        f"({total_lines:,} lines) in {dt:.1f}s  ->  {total_lines / dt:,.0f} lines/s on {workers} workers",
+        file=sys.stderr,
+    )
+
+
+def run_pairs(args: argparse.Namespace) -> None:
+    """Build (gloss -> docstring) training pairs for the neural refiner."""
+    from .refiner.data import make_pairs
+
+    files = _iter_files(args.paths)
+    root = os.path.commonpath([str(p.parent) for p in files]) if files else None
+    batches = [[str(p) for p in b] for b in _chunks(files, 32)]
+    n = 0
+    with ProcessPoolExecutor(max_workers=args.jobs or os.cpu_count()) as ex, open(args.output, "w", encoding="utf-8") as out:
+        for rows, _ in ex.map(_work_many, batches, [root] * len(batches)):
+            for pair in make_pairs(rows):
+                out.write(json.dumps(pair, ensure_ascii=False) + "\n")
+                n += 1
+    print(f"wrote {n:,} training pairs to {args.output}", file=sys.stderr)
+
+
+def run_refine(args: argparse.Namespace) -> None:
+    from .refiner.translate import refine_file
+
+    refine_file(args.input, args.output, args.model, batch_size=args.batch_size, device=args.device)
+
+
+def main(argv: list[str] | None = None) -> None:
+    ap = argparse.ArgumentParser(prog="lean_translator", description="Lean 4 -> English translator")
+    sub = ap.add_subparsers(dest="cmd", required=True)
+
+    g = sub.add_parser("gloss", help="stage 1: rule-based Lean -> Lean-English")
+    g.add_argument("paths", nargs="+", help=".lean files or directories, or - for stdin")
+    g.add_argument("-o", "--output")
+    g.add_argument("-j", "--jobs", type=int, default=0)
+    g.add_argument("--format", choices=["jsonl", "text"], default="jsonl")
+    g.set_defaults(func=run_gloss)
+
+    p = sub.add_parser("pairs", help="build stage-2 training pairs (gloss -> docstring)")
+    p.add_argument("paths", nargs="+")
+    p.add_argument("-o", "--output", required=True)
+    p.add_argument("-j", "--jobs", type=int, default=0)
+    p.set_defaults(func=run_pairs)
+
+    r = sub.add_parser("refine", help="stage 2: neural Lean-English -> English")
+    r.add_argument("input", help="jsonl produced by `gloss`")
+    r.add_argument("-o", "--output", required=True)
+    r.add_argument("--model", required=True)
+    r.add_argument("--batch-size", type=int, default=256)
+    r.add_argument("--device", default=None)
+    r.set_defaults(func=run_refine)
+
+    args = ap.parse_args(argv)
+    args.func(args)
+
+
+if __name__ == "__main__":
+    main()
