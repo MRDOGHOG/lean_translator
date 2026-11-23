@@ -670,7 +670,9 @@ def gloss_decl(d: Decl) -> Translation:
     plain = [v for v in type_vars if v not in described]
     if plain:
         sentences.append(f"Let {_join_and(plain)} be {'types' if len(plain) > 1 else 'a type'}.")
+    extra_facts = list(dict.fromkeys(extra_facts))
     for v, phrases in described.items():
+        phrases = list(dict.fromkeys(phrases))
         is_a = [p[3:] for p in phrases if p.startswith("is ")]
         others = [p for p in phrases if not p.startswith("is ")]
         if is_a:
@@ -741,7 +743,10 @@ def gloss_decl(d: Decl) -> Translation:
         parents = parse(d.extends) if d.extends else None
         line = f"{_cap(head)} consists of"
         if d.extends:
-            parent_txt = _join_and([_class_fact(g, p)[1] if _class_fact(g, p) else g.term(p) for p in _comma_split(d.extends)])
+            parent_txt = _join_and([
+                _class_fact(g, p)[1].removeprefix("is ") if _class_fact(g, p) else g.term(p)
+                for p in _comma_split(d.extends)
+            ])
             line = f"{_cap(head)} is {parent_txt}"
             line += ", together with" if d.fields else "."
         if d.fields:

@@ -95,6 +95,32 @@ statement), `gloss` (stage 1), `name_gloss`, `doc`, and after stage 2
   LR schedule, validation on **held-out files**, and a wall-clock budget.
 - `translate.py`: batched greedy decoding over stage-1 JSONL.
 
+## Current results
+
+**Stage 1** runs on all of Mathlib (8,733 files, 2.39M lines, 263,823
+declarations) in about 17 s on 4 CPU cores, with zero crashes.
+
+**Stage 2** (first run): a 3.7M-parameter model, trained for 40 minutes on CPU
+over 4 epochs, reached a held-out-file validation perplexity of 19.8.
+*It is not good enough yet.* It learned the docstring style, but it
+regularly says false things:
+
+| Lean | stage 1 (faithful) | stage 2 (fluent, wrong) |
+|---|---|---|
+| `trace (diagonal d) = ∑ i, d i` | Then trace(diagonal(d)) equals (the sum of d(i) over all i). | The trace of a matrix is diagonal. |
+| `(hx : x ∈ I) : x * y ∈ I` | Assume that x is in I. Then x * y is in I. | If `x` is a non-zero ideal, then … |
+
+So for now, **use the stage-1 output.** To make stage 2 trustworthy, the
+likely levers, roughly in order of impact, are:
+1. **Scale:** around 30–60M parameters trained for hours on a GPU, which is
+   still tiny next to an LLM.
+2. **A copy/pointer mechanism**, so variables and terms are copied from the
+   gloss instead of being regenerated.
+3. **Better targets:** docstrings often aren't paraphrases of the statement.
+   Filter pairs by overlap, or bootstrap cleaner targets.
+4. **A faithfulness check:** the identifiers and relations in the output
+   must match the gloss, and if they don't, fall back to the gloss.
+
 ## Honest notes / limits
 
 - **Speed:** stage 1 really is "millions of lines in seconds" (it's pure

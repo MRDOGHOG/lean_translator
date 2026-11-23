@@ -84,14 +84,25 @@ class Seq2Seq(nn.Module):
         return self.decode(tgt_in, mem, mask)
 
     @torch.no_grad()
-    def greedy(self, src: torch.Tensor, max_len: int = 128) -> torch.Tensor:
-        """Batched greedy decoding (re-runs the decoder each step; fine for short outputs)."""
+    def greedy(self, src: torch.Tensor, max_len: int = 128, no_repeat_ngram: int = 3) -> torch.Tensor:
+        """Batched greedy decoding (re-runs the decoder each step; fine for short outputs).
+
+        `no_repeat_ngram` forbids emitting any n-gram twice, the standard
+        fix for small models getting stuck in loops ("new new new ...")."""
         mem, mask = self.encode(src)
         B = src.size(0)
         ys = torch.full((B, 1), BOS, dtype=torch.long, device=src.device)
         done = torch.zeros(B, dtype=torch.bool, device=src.device)
         for _ in range(max_len):
             logits = self.decode(ys, mem, mask)[:, -1]
+            if no_repeat_ngram and ys.size(1) >= no_repeat_ngram:
+                n = no_repeat_ngram
+                rows = ys.tolist()
+                for b, seq in enumerate(rows):
+                    prefix = tuple(seq[len(seq) - n + 1 :])
+                    banned = [seq[i + n - 1] for i in range(len(seq) - n + 1) if tuple(seq[i : i + n - 1]) == prefix]
+                    if banned:
+                        logits[b, banned] = float("-inf")
             nxt = logits.argmax(-1)
             nxt = torch.where(done, torch.full_like(nxt, PAD), nxt)
             ys = torch.cat([ys, nxt.unsqueeze(1)], dim=1)
