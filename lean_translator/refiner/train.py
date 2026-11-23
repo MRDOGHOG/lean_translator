@@ -96,7 +96,7 @@ def main(argv: list[str] | None = None) -> None:
 
     opt = torch.optim.AdamW(model.parameters(), lr=args.lr, betas=(0.9, 0.98), weight_decay=0.01)
     loss_fn = nn.CrossEntropyLoss(ignore_index=PAD, label_smoothing=0.1)
-    warmup = 1000
+    warmup = 500
     step = 0
     best = math.inf
     t0 = time.time()
@@ -114,7 +114,7 @@ def main(argv: list[str] | None = None) -> None:
             nn.utils.clip_grad_norm_(model.parameters(), 1.0)
             opt.step()
             step += 1
-            if step % 100 == 0:
+            if step % 250 == 0:
                 print(f"epoch {epoch} step {step} loss {loss.item():.3f} lr {lr:.2e} [{time.time() - t0:.0f}s]", flush=True)
             if time.time() - t0 > budget:
                 break
