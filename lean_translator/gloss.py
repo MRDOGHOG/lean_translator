@@ -10,7 +10,7 @@ rewrites it into fluent prose.
 from __future__ import annotations
 
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 from . import vocab
 from .decls import Binder, Decl
@@ -76,11 +76,14 @@ class Translation:
     gloss: str
     name_gloss: str
     doc: str | None
+    masked: str = ""  # gloss with math terms replaced by [T0], [T1], ...
+    slots: list[str] = field(default_factory=list)  # what each [Tk] stands for
 
     def to_dict(self) -> dict:
         return {
             "name": self.name, "kind": self.kind, "file": self.file, "line": self.line,
             "lean": self.lean, "gloss": self.gloss, "name_gloss": self.name_gloss, "doc": self.doc,
+            "masked": self.masked, "slots": self.slots,
         }
 
 
@@ -89,6 +92,12 @@ class Glosser:
         self.locals: set[str] = set()
         self.prop_vars: set[str] = set()
         self.type_vars: set[str] = set()
+        # Masking: when on, every top-level math term is replaced by a slot
+        # marker [Tk] so a neural model can rewrite the prose around the math
+        # without ever being able to alter the math itself.
+        self.masking = False
+        self.slots: list[str] = []
+        self._depth = 0
 
     # ------------------------------------------------------------------ names
     def _split_local(self, n: Name) -> Node:
@@ -124,8 +133,16 @@ class Glosser:
 
     # ------------------------------------------------------------------ terms
     def term(self, n: Node, prec: int = 0) -> str:
-        s, p = self._term(n)
-        return f"({s})" if p < prec else s
+        self._depth += 1
+        try:
+            s, p = self._term(n)
+        finally:
+            self._depth -= 1
+        out = f"({s})" if p < prec else s
+        if self.masking and self._depth == 0 and not _ATOM_RE.match(out):
+            self.slots.append(out)
+            return slot_marker(len(self.slots) - 1)
+        return out
 
     def _term(self, n: Node) -> tuple[str, int]:
         if isinstance(n, Name):
@@ -433,10 +450,13 @@ class Glosser:
                     if pos in s:
                         return s.replace(pos, neg, 1)
         if isinstance(n, Quant) and n.q == "∃":
-            rest = self._quant_prop(n)[len("there exists ") :]
+            whole = self._quant_prop(n)  # render once: rendering allocates slots
+            if not whole.startswith("there exists "):
+                return f"it is not the case that {whole}"
+            rest = whole[len("there exists ") :]
             for art in ("a ", "an "):
                 rest = rest.removeprefix(art)
-            return "there is no " + rest if self._quant_prop(n).startswith("there exists ") else f"it is not the case that {self.prop(n)}"
+            return "there is no " + rest
         return f"it is not the case that {self.prop(n)}"
 
     def _quant_prop(self, n: Quant) -> str:
@@ -713,6 +733,9 @@ def gloss_decl(d: Decl) -> Translation:
         sentences.append(f"Let {_join_and(names)} be {noun}.")
 
     # --- hypotheses --------------------------------------------------------
+    # From here on, math terms go into slots (see Glosser.masking).
+    n_plain = len(sentences)
+    g.masking = True
     if hyps:
         sentences.append("Assume " + _join_and([f"that {g.prop(h)}" for h in hyps]) + ".")
 
@@ -771,11 +794,50 @@ def gloss_decl(d: Decl) -> Translation:
     elif kind == "inductive":
         sentences.append(f"{_last(shown)} is an inductive type" + (f" of {g.type_phrase(stmt, plural=True)}." if stmt is not None else "."))
 
-    text = " ".join(s for s in sentences if s)
+    g.masking = False
+    head = f"{_KIND_WORD.get(kind, kind)} {shown}: "
+    masked = head + " ".join(x for x in sentences if x)
+    del n_plain
+    masked, slots = _renumber(masked, g.slots)
     return Translation(
         name=shown, kind=kind, file=d.file, line=d.line, lean=d.signature,
-        gloss=f"{_KIND_WORD.get(kind, kind)} {shown}: {text}", name_gloss=gloss_name(shown), doc=d.doc,
+        gloss=unmask(masked, slots), name_gloss=gloss_name(shown), doc=d.doc,
+        masked=masked, slots=slots,
     )
+
+
+def _renumber(masked: str, slots: list[str]) -> tuple[str, list[str]]:
+    """Some code paths render a term and then discard the text, leaving
+    orphan slots.  Renumber by order of appearance and drop the unused ones,
+    so slots are always [T0], [T1], ... each appearing exactly once."""
+    new: list[str] = []
+
+    def sub(m: re.Match) -> str:
+        new.append(slots[int(m.group(1))])
+        return slot_marker(len(new) - 1)
+
+    return _SLOT_RE.sub(sub, masked), new
+
+
+# Bare variables and numbers (`s`, `n₁`, `0`, `π`) stay inline; only compound
+# terms are worth hiding from the neural model.
+_ATOM_RE = re.compile(r"^[^\s()\[\]{},+\-*/^=<>|‖⟨⟩·•∘]{1,6}$")
+_SLOT_RE = re.compile(r"\[T(\d+)\]")
+
+
+def slot_marker(k: int) -> str:
+    return f"[T{k}]"
+
+
+def unmask(text: str, slots: list[str]) -> str:
+    """Put the math back: replace each [Tk] with slots[k]."""
+    return _SLOT_RE.sub(lambda m: slots[int(m.group(1))] if int(m.group(1)) < len(slots) else m.group(0), text)
+
+
+def slot_check(text: str, n_slots: int) -> bool:
+    """True iff every slot [T0]..[T{n-1}] appears exactly once and nothing else does."""
+    found = [int(k) for k in _SLOT_RE.findall(text)]
+    return sorted(found) == list(range(n_slots))
 
 
 def _comma_split(toks: list[Token]) -> list[Node]:

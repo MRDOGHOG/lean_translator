@@ -13,7 +13,7 @@ import time
 import torch
 from torch import nn
 
-from .data import load_pairs, split_by_file
+from .data import load_pairs, oriented, split_by_file
 from .model import PAD, Config, Seq2Seq
 from .tokenizer import decode, encode, train_tokenizer
 
@@ -71,6 +71,7 @@ def main(argv: list[str] | None = None) -> None:
     ap.add_argument("--lr", type=float, default=7e-4)
     ap.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")
     ap.add_argument("--threads", type=int, default=0)
+    ap.add_argument("--reverse", action="store_true", help="train English -> gloss (for round-trip checks)")
     args = ap.parse_args(argv)
     if args.threads:
         torch.set_num_threads(args.threads)
@@ -78,6 +79,8 @@ def main(argv: list[str] | None = None) -> None:
     torch.manual_seed(0)
 
     pairs = load_pairs(args.pairs)
+    meta = {"masked": "slots" in pairs[0], "direction": "reverse" if args.reverse else "forward"}
+    pairs = oriented(pairs, args.reverse)
     train, valid = split_by_file(pairs)
     print(f"{len(train):,} train / {len(valid):,} valid pairs")
     tok = train_tokenizer(
@@ -122,7 +125,7 @@ def main(argv: list[str] | None = None) -> None:
         print(f"== epoch {epoch} valid loss {vl:.3f} (ppl {math.exp(vl):.1f})", flush=True)
         if vl < best:
             best = vl
-            model.save(args.output, tok.to_str())
+            model.save(args.output, tok.to_str(), meta)
             print(f"   saved {args.output}", flush=True)
         if time.time() - t0 > budget:
             break

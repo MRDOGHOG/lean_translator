@@ -117,7 +117,8 @@ def run_pairs(args: argparse.Namespace) -> None:
 def run_refine(args: argparse.Namespace) -> None:
     from .refiner.translate import refine_file
 
-    refine_file(args.input, args.output, args.model, batch_size=args.batch_size, device=args.device)
+    refine_file(args.input, args.output, args.model, batch_size=args.batch_size, device=args.device,
+                check=args.check, min_score=args.min_score)
 
 
 def main(argv: list[str] | None = None) -> None:
@@ -140,8 +141,10 @@ def main(argv: list[str] | None = None) -> None:
     r = sub.add_parser("refine", help="stage 2: neural Lean-English -> English")
     r.add_argument("input", help="jsonl produced by `gloss`")
     r.add_argument("-o", "--output", required=True)
-    r.add_argument("--model", required=True)
-    r.add_argument("--batch-size", type=int, default=256)
+    r.add_argument("--model", required=True, help="refiner.pt (from train) or a directory (from train_hf)")
+    r.add_argument("--batch-size", type=int, default=64)
+    r.add_argument("--check", help="reverse model for the round-trip check (outputs that fail fall back to the gloss)")
+    r.add_argument("--min-score", type=float, default=0.6)
     r.add_argument("--device", default=None)
     r.set_defaults(func=run_refine)
 

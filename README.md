@@ -87,39 +87,104 @@ statement), `gloss` (stage 1), `name_gloss`, `doc`, and after stage 2
 | `vocab.py` | Plain-data dictionaries (types, type classes, predicates, functions, name words). **This is where to add coverage.** |
 
 ### Stage 2 — `lean_translator/refiner/`
-- **Free parallel data.** Every Mathlib declaration with a docstring gives a
-  pair (stage-1 gloss → human docstring). That's about 72k pairs, with no labelling needed.
-- `model.py`: a standard pre-norm Transformer encoder–decoder with tied
-  embeddings and a shared byte-level BPE vocabulary (8k).
-- `train.py`: token-budget length bucketing, label smoothing, inverse-sqrt
-  LR schedule, validation on **held-out files**, and a wall-clock budget.
-- `translate.py`: batched greedy decoding over stage-1 JSONL.
+
+```
+ Lean ─► stage 1 ─► masked gloss ───────► small seq2seq ───► English with [T0] [T1]
+                    "Then [T0] equals [T1]."                      │
+                    slots: n * 2, n + n                           ▼
+                                           ① slot check: every [Tk] exactly once?
+                                           ② round trip: reverse model gets back the gloss?
+                                                  │ yes                     │ no
+                                                  ▼                         ▼
+                                   fill slots: "… n * 2 = n + n"   use the stage-1 gloss
+```
+
+Four safeguards stop the neural layer from saying wrong things:
+
+1. **Masking (`gloss.py`).** Compound math terms become slots `[T0]`, `[T1]`, …
+   The neural model only rewrites the prose *around* the math; it never sees
+   or produces the math, so it can't get it wrong. Bare variables and numbers
+   stay inline. Across all of Mathlib, filling the slots back in reproduces
+   the stage-1 gloss exactly.
+2. **A pretrained start (`train_hf.py`).** Fine-tune `google/flan-t5-small`
+   (~77M parameters), which already knows English, instead of training from
+   scratch. The slot markers, plus any character T5's vocabulary lacks
+   (`{`, `ℕ`, `α`, …), are added as tokens.
+3. **Clean targets (`distill.py`).** Claude writes faithful English for each
+   masked gloss, once and offline, through the Message Batches API. It must
+   copy every slot back verbatim, and replies that don't are discarded. The
+   big model only makes training data; the shipped translator stays small.
+4. **Round-trip check (`roundtrip.py`).** A reverse model (English → gloss)
+   checks that the English still says the same thing. This is used both to
+   filter the training data and at translation time. It catches dropped or
+   invented conditions; it can miss a misreading that both directions share,
+   which is why the exact slot check always runs as well.
+
+If any check fails, the output falls back to the stage-1 gloss. The worst
+case is robotic English, never wrong English.
+
+Other files: `model.py` and `train.py` are the original from-scratch
+transformer, for use without a download; `backends.py` puts both model
+kinds behind one interface; and `data.py` builds the free (gloss → Mathlib
+docstring) pairs.
+
+### Recipe (on a GPU machine)
+
+```bash
+pip install -e '.[refiner,distill]'
+python -m lean_translator gloss path/to/Mathlib -o mathlib.jsonl
+```
+
+1. Make the targets. Start with a small pilot to check quality and the real cost:
+```bash
+python -m lean_translator.refiner.distill prepare mathlib.jsonl -n 1000 -o pilot/
+```
+```bash
+python -m lean_translator.refiner.distill submit pilot/
+```
+```bash
+python -m lean_translator.refiner.distill collect pilot/
+```
+
+2. Train the reverse model, filter the targets by round trip, then train the forward model:
+```bash
+python -m lean_translator.refiner.train_hf pilot/distilled.jsonl -o reverse-t5/ --reverse --bf16
+```
+```bash
+python -m lean_translator.refiner.roundtrip filter pilot/distilled.jsonl --reverse reverse-t5/ -o clean.jsonl
+```
+```bash
+python -m lean_translator.refiner.train_hf clean.jsonl -o refiner-t5/ --bf16
+```
+
+3. Translate, with every check on:
+```bash
+python -m lean_translator refine mathlib.jsonl -o mathlib.english.jsonl --model refiner-t5/ --check reverse-t5/
+```
+
+Rough distillation cost for 250k statements at batch prices (`prepare`
+prints an estimate; `collect` reports the actual usage): Opus 5.5 ~$700,
+Sonnet 5.5 ~$360, Haiku 5.5 ~$20.
 
 ## Current results
 
 **Stage 1** runs on all of Mathlib (8,733 files, 2.39M lines, 263,823
 declarations) in about 17 s on 4 CPU cores, with zero crashes.
 
-**Stage 2** (first run): a 3.7M-parameter model, trained for 40 minutes on CPU
-over 4 epochs, reached a held-out-file validation perplexity of 19.8.
-*It is not good enough yet.* It learned the docstring style, but it
-regularly says false things:
+**Stage 2**, first run, before any of the safeguards above: a 3.7M-parameter
+from-scratch model, trained for 40 minutes on CPU on docstring pairs. It
+learned the docstring style but regularly said false things:
 
-| Lean | stage 1 (faithful) | stage 2 (fluent, wrong) |
+| Lean | stage 1 (faithful) | first stage 2 (fluent, wrong) |
 |---|---|---|
 | `trace (diagonal d) = ∑ i, d i` | Then trace(diagonal(d)) equals (the sum of d(i) over all i). | The trace of a matrix is diagonal. |
 | `(hx : x ∈ I) : x * y ∈ I` | Assume that x is in I. Then x * y is in I. | If `x` is a non-zero ideal, then … |
 
-So for now, **use the stage-1 output.** To make stage 2 trustworthy, the
-likely levers, roughly in order of impact, are:
-1. **Scale:** around 30–60M parameters trained for hours on a GPU, which is
-   still tiny next to an LLM.
-2. **A copy/pointer mechanism**, so variables and terms are copied from the
-   gloss instead of being regenerated.
-3. **Better targets:** docstrings often aren't paraphrases of the statement.
-   Filter pairs by overlap, or bootstrap cleaner targets.
-4. **A faithfulness check:** the identifiers and relations in the output
-   must match the gloss, and if they don't, fall back to the gloss.
+The safeguarded pipeline has been smoke-tested end-to-end on CPU, with a
+tiny randomly-initialized T5 and synthetic pairs, because this sandbox can't
+download pretrained models or call the API. The plumbing works, and with
+deliberately bad models the checks rejected 100% of the outputs and fell
+back to the gloss. Its *quality* is untested until the GPU run above.
 
 ## Honest notes / limits
 

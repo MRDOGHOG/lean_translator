@@ -67,3 +67,10 @@ def split_by_file(pairs: list[dict], valid_frac: float = 0.03, seed: int = 0) ->
     train = [p for p in pairs if p["file"] not in held]
     valid = [p for p in pairs if p["file"] in held]
     return train, valid
+
+
+def oriented(pairs: list[dict], reverse: bool) -> list[dict]:
+    """Swap source and target to train the English -> gloss direction."""
+    if not reverse:
+        return pairs
+    return [{**p, "src": p["tgt"], "tgt": p["src"]} for p in pairs]

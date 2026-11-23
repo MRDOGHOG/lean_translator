@@ -111,8 +111,9 @@ class Seq2Seq(nn.Module):
                 break
         return ys[:, 1:]
 
-    def save(self, path: str, tokenizer_json: str) -> None:
-        torch.save({"cfg": asdict(self.cfg), "state": self.state_dict(), "tokenizer": tokenizer_json}, path)
+    def save(self, path: str, tokenizer_json: str, meta: dict | None = None) -> None:
+        torch.save({"cfg": asdict(self.cfg), "state": self.state_dict(), "tokenizer": tokenizer_json,
+                    "meta": meta or {}}, path)
 
     @staticmethod
     def load(path: str, device: str = "cpu") -> tuple["Seq2Seq", str]:

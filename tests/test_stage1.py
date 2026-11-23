@@ -111,3 +111,37 @@ def test_riemann_hypothesis():
         "if ζ(s) equals 0, there is no natural number n such that s equals -2 * (n + 1) and "
         "s does not equal 1, then the real part of s equals 1 / 2."
     )
+
+
+def _masked(src: str):
+    from lean_translator.gloss import gloss_decl
+
+    (d,) = extract_decls(src)
+    return gloss_decl(d)
+
+
+def test_masking_hides_compound_terms_only():
+    t = _masked("theorem t (n : ℕ) : ∑ i ∈ Finset.range n, i = n * (n - 1) / 2 := sorry")
+    assert t.masked == "Theorem t: Let n be a natural number. Then [T0] equals [T1]."
+    assert t.slots == ["(the sum of i over i ∈ {0, …, n - 1})", "n * (n - 1) / 2"]
+
+
+def test_masking_round_trips_exactly():
+    from lean_translator.gloss import slot_check, unmask
+
+    t = _masked(
+        "def RiemannHypothesis : Prop :=\n"
+        "  ∀ (s : ℂ) (_ : riemannZeta s = 0) (_ : ¬∃ n : ℕ, s = -2 * (n + 1)) (_ : s ≠ 1), s.re = 1 / 2\n"
+    )
+    assert t.slots == ["ζ(s)", "-2 * (n + 1)", "the real part of s", "1 / 2"]
+    assert slot_check(t.masked, len(t.slots))
+    assert unmask(t.masked, t.slots) == t.gloss
+
+
+def test_slot_check_rejects_dropped_or_duplicated_slots():
+    from lean_translator.gloss import slot_check
+
+    assert slot_check("[T1] then [T0]", 2)  # reordering is fine
+    assert not slot_check("[T0] only", 2)  # dropped
+    assert not slot_check("[T0] [T0] [T1]", 2)  # duplicated
+    assert not slot_check("[T0] [T1] [T2]", 2)  # invented
