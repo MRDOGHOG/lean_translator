@@ -110,8 +110,9 @@ Four safeguards stop the neural layer from saying wrong things:
    (~77M parameters), which already knows English, instead of training from
    scratch. The slot markers, plus any character T5's vocabulary lacks
    (`{`, `ℕ`, `α`, …), are added as tokens.
-3. **Clean targets (`distill.py`).** Claude writes faithful English for each
-   masked gloss, once and offline, through the Message Batches API. It must
+3. **Clean targets (`distill.py`).** A large model writes faithful English for
+   each masked gloss, once and offline: either Claude through the Message
+   Batches API, or a local model through Ollama, free. It must
    copy every slot back verbatim, and replies that don't are discarded. The
    big model only makes training data; the shipped translator stays small.
 4. **Round-trip check (`roundtrip.py`).** A reverse model (English → gloss)
@@ -144,6 +145,14 @@ python -m lean_translator.refiner.distill submit pilot/
 ```
 ```bash
 python -m lean_translator.refiner.distill collect pilot/
+```
+
+Or do it free and locally with any model you've pulled into
+[Ollama](https://ollama.com) instead of `submit`/`collect`. Quality depends on
+the model; bigger is better if your GPU fits it. Every reply goes through
+the same slot check, and if you stop it, rerunning resumes where it left off.
+```bash
+python -m lean_translator.refiner.distill ollama pilot/ --ollama-model qwen2.5:14b
 ```
 
 2. Train the reverse model, filter the targets by round trip, then train the forward model:

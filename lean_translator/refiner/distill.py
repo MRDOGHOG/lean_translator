@@ -16,6 +16,9 @@ The big model is used only to create data; the shipped translator stays tiny.
 
     # 3. download, validate slots, write training pairs
     python -m lean_translator.refiner.distill collect pilot/
+
+    # or, free and local, instead of 2-3: any model served by Ollama
+    python -m lean_translator.refiner.distill ollama pilot/ --ollama-model qwen2.5:14b
 """
 
 from __future__ import annotations
@@ -25,6 +28,7 @@ import json
 import random
 import re
 import sys
+import time
 from pathlib import Path
 
 from ..gloss import slot_check
@@ -75,6 +79,28 @@ SLOTS: [T0] = ζ(s); [T1] = -2 * (n + 1); [T2] = the real part of s; [T3] = 1 / 
 
 KINDS = {"theorem", "lemma", "def", "abbrev", "instance", "structure", "class"}
 _ENGLISH = re.compile(r"<english>(.*?)</english>", re.S)
+_THINK = re.compile(r"<think>.*?</think>", re.S)  # reasoning models served by Ollama
+
+
+def validate(item: dict, text: str) -> tuple[str, dict | None]:
+    """Turn one model reply into a training pair, or say why it was rejected."""
+    m = _ENGLISH.search(_THINK.sub("", text))
+    if not m:
+        return "no_tags", None
+    english = " ".join(m.group(1).split())
+    # The free, exact check: every slot exactly once, none invented.
+    if not slot_check(english, len(item["slots"])):
+        return "bad_slots", None
+    return "ok", {"src": item["masked"], "tgt": english, "slots": item["slots"], "name": item["name"],
+                  "file": item["file"], "name_gloss": item["name_gloss"]}
+
+
+def write_pairs(d: Path, pairs: list[dict], stats: dict) -> None:
+    with open(d / "distilled.jsonl", "w", encoding="utf-8") as f:
+        for p in pairs:
+            f.write(json.dumps(p, ensure_ascii=False) + "\n")
+    print(json.dumps(stats))
+    print(f"wrote {len(pairs):,} pairs to {d / 'distilled.jsonl'}")
 
 
 def user_prompt(row: dict) -> str:
@@ -171,28 +197,82 @@ def cmd_collect(args: argparse.Namespace) -> None:
             if msg.stop_reason == "refusal":
                 stats["refusal"] += 1
                 continue
-            text = "".join(b.text for b in msg.content if b.type == "text")
-            m = _ENGLISH.search(text)
-            if not m:
-                stats["no_tags"] += 1
-                continue
-            english = " ".join(m.group(1).split())
-            # The free, exact check: every slot exactly once, none invented.
-            if not slot_check(english, len(it["slots"])):
-                stats["bad_slots"] += 1
-                continue
-            stats["ok"] += 1
-            pairs.append({"src": it["masked"], "tgt": english, "slots": it["slots"], "name": it["name"],
-                          "file": it["file"], "name_gloss": it["name_gloss"]})
-    with open(d / "distilled.jsonl", "w", encoding="utf-8") as f:
-        for p in pairs:
-            f.write(json.dumps(p, ensure_ascii=False) + "\n")
+            status, pair = validate(it, "".join(b.text for b in msg.content if b.type == "text"))
+            stats[status] += 1
+            if pair:
+                pairs.append(pair)
+    write_pairs(d, pairs, stats)
     model = next(iter(items.values()))["model"] if items else DEFAULT_MODEL
     pin, pout, pcache = PRICES.get(model, PRICES[DEFAULT_MODEL])
     cost = 0.5 * (usage["input"] * pin + usage["output"] * pout + usage["cache_read"] * pcache) / 1e6
-    print(json.dumps(stats))
     print(f"usage: {usage}  ->  ~${cost:,.2f} at batch prices (cache writes not included)")
-    print(f"wrote {len(pairs):,} pairs to {d / 'distilled.jsonl'}")
+
+
+# ---------------------------------------------------------------------------
+# Local alternative: any model served by Ollama.  Free, no API key, runs on
+# your own GPU; quality depends on the model you pick.
+
+def ollama_chat(host: str, model: str, system: str, user: str, timeout: float = 600) -> str:
+    """One non-streaming request to Ollama's /api/chat (standard library only)."""
+    import urllib.request
+
+    body = json.dumps({
+        "model": model,
+        "messages": [{"role": "system", "content": system}, {"role": "user", "content": user}],
+        "stream": False,
+        "options": {"temperature": 0.2, "num_ctx": 8192},
+    }).encode()
+    req = urllib.request.Request(f"{host.rstrip('/')}/api/chat", data=body,
+                                 headers={"Content-Type": "application/json"})
+    # Ollama is normally on this machine or LAN; don't route it through an HTTP proxy.
+    opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+    with opener.open(req, timeout=timeout) as resp:
+        return json.loads(resp.read())["message"]["content"]
+
+
+def cmd_local(args: argparse.Namespace) -> None:
+    from concurrent.futures import ThreadPoolExecutor
+
+    d = Path(args.dir)
+    items = [json.loads(line) for line in open(d / "items.jsonl", encoding="utf-8")]
+    raw_path = d / f"ollama_raw.{args.ollama_model.replace('/', '_').replace(':', '_')}.jsonl"
+    done: dict[str, str] = {}
+    if raw_path.exists():  # resume: skip items already answered
+        for line in open(raw_path, encoding="utf-8"):
+            r = json.loads(line)
+            done[r["id"]] = r["text"]
+    todo = [it for it in items if it["id"] not in done]
+    print(f"{len(done):,} already done, {len(todo):,} to go with {args.ollama_model} at {args.host}")
+
+    def ask(it: dict) -> tuple[str, str | None]:
+        try:
+            return it["id"], ollama_chat(args.host, args.ollama_model, SYSTEM, user_prompt(it))
+        except Exception as e:  # keep going; failed items are retried on the next run
+            print(f"\n{it['id']}: {e!r}", file=sys.stderr)
+            return it["id"], None
+
+    t0 = time.time()
+    with open(raw_path, "a", encoding="utf-8") as raw, ThreadPoolExecutor(args.workers) as ex:
+        for k, (iid, text) in enumerate(ex.map(ask, todo), 1):
+            if text is not None:
+                done[iid] = text
+                raw.write(json.dumps({"id": iid, "text": text}, ensure_ascii=False) + "\n")
+                raw.flush()
+            rate = k / max(time.time() - t0, 1e-9)
+            print(f"\r{k:,}/{len(todo):,}  {rate:.2f} items/s", end="", file=sys.stderr)
+    print(file=sys.stderr)
+
+    stats = {"ok": 0, "bad_slots": 0, "no_tags": 0, "missing": 0}
+    pairs = []
+    for it in items:
+        if it["id"] not in done:
+            stats["missing"] += 1
+            continue
+        status, pair = validate(it, done[it["id"]])
+        stats[status] += 1
+        if pair:
+            pairs.append(pair)
+    write_pairs(d, pairs, stats)
 
 
 def main(argv: list[str] | None = None) -> None:
@@ -212,6 +292,12 @@ def main(argv: list[str] | None = None) -> None:
     c = sub.add_parser("collect")
     c.add_argument("dir")
     c.set_defaults(func=cmd_collect)
+    o = sub.add_parser("ollama", help="generate targets with a local model served by Ollama (free)")
+    o.add_argument("dir")
+    o.add_argument("--ollama-model", default="qwen2.5:14b", help="any model you've pulled with `ollama pull`")
+    o.add_argument("--host", default="http://localhost:11434")
+    o.add_argument("--workers", type=int, default=2, help="parallel requests (set OLLAMA_NUM_PARALLEL to match)")
+    o.set_defaults(func=cmd_local)
     args = ap.parse_args(argv)
     args.func(args)
 
