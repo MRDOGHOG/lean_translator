@@ -8,6 +8,7 @@ dependencies = []
 [project.optional-dependencies]
 refiner = ["torch>=2.0", "tokenizers>=0.15", "transformers>=4.40", "sentencepiece"]
 distill = ["anthropic>=1.0"]
+proofsat = ["pycosat"]
 dev = ["pytest"]
 
 [project.scripts]
@@ -18,4 +19,4 @@ requires = ["setuptools>=61"]
 build-backend = "setuptools.build_meta"
 
 [tool.setuptools.packages.find]
-include = ["lean_translator*"]
+include = ["lean_translator*", "proofsat*"]
