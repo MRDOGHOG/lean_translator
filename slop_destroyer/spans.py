@@ -43,10 +43,20 @@ def _is_start(toks: list[Token], i: int) -> bool:
 
 
 def _head(toks: list[Token]) -> tuple[str, int]:
-    """First token that isn't a docstring, attribute or modifier."""
+    """First token that isn't a docstring, attribute, modifier or `... in` prefix."""
     i = 0
     while i < len(toks):
         t = toks[i]
+        if t.col == 0 and t.text in ("set_option", "open", "variable", "omit", "include") and i > 0 or (
+            t.col == 0 and t.text in ("set_option", "open", "variable", "omit", "include")
+            and any(x.text == "in" and x.line == t.line for x in toks[i:])
+            and any(x.col == 0 and x.line > t.line for x in toks[i:])
+        ):
+            # skip `set_option ... in` prefix lines
+            line = t.line
+            while i < len(toks) and toks[i].line == line:
+                i += 1
+            continue
         if t.kind in ("doc", "moddoc"):
             i += 1
         elif t.text == "@[":
@@ -81,7 +91,8 @@ def split_commands(src: str) -> list[Span]:
     carry: list[Token] = []
     for chunk in raw:
         head, _ = _head(carry + chunk)
-        if not head:
+        # `set_option ... in` / `open ... in` on its own line belongs to the next command
+        if not head or chunk[-1].text == "in":
             carry += chunk
             continue
         groups.append(carry + chunk)

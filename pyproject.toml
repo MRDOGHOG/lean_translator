@@ -13,10 +13,14 @@ dev = ["pytest"]
 
 [project.scripts]
 lean-translator = "lean_translator.cli:main"
+SLOP_DESTROYER = "slop_destroyer.__main__:main"
 
 [build-system]
 requires = ["setuptools>=61"]
 build-backend = "setuptools.build_meta"
 
 [tool.setuptools.packages.find]
-include = ["lean_translator*", "proofsat*"]
+include = ["lean_translator*", "proofsat*", "slop_destroyer*"]
+
+[tool.setuptools.package-data]
+slop_destroyer = ["DumpDeps.lean"]

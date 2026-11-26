@@ -9,7 +9,7 @@ Dump the dependency graph that Lean already recorded in a *built* project.
 Loads MODULE... (e.g. `Mathlib`) from their compiled .olean files and writes
 one line per constant whose module name starts with one of PREFIX...:
 
-    name <TAB> module <TAB> startLine <TAB> endLine <TAB> isMeta <TAB> dep dep dep ...
+    name <TAB> module <TAB> startLine <TAB> endLine <TAB> isMeta <TAB> deps... <TAB> statement deps...
 
 `dep`s are every constant mentioned in the constant's type or value (its
 proof term, for theorems), i.e. exactly what Lean used, including instances
@@ -30,13 +30,14 @@ def splitArgs (args : List String) : List String × List String :=
 def isMetaType (e : Expr) : Bool :=
   e.getUsedConstants.any fun c => (`Lean).isPrefixOf c || (`IO).isPrefixOf c
 
-def main (args : List String) : IO UInt32 := do
+unsafe def main (args : List String) : IO UInt32 := do
   let out :: rest := args | do IO.eprintln "usage: DumpDeps OUT PREFIX... -- MODULE..."; return 1
   let (prefixes, mods) := splitArgs rest
   if mods.isEmpty then
     IO.eprintln "no modules given"; return 1
   let prefixes := prefixes.map String.toName
   initSearchPath (← findSysroot)
+  enableInitializersExecution
   let env ← importModules (mods.toArray.map fun m => { module := m.toName }) {} (trustLevel := 1024) (loadExts := true)
   let modNames := env.header.moduleNames
   let h ← IO.FS.Handle.mk out .write
@@ -48,8 +49,9 @@ def main (args : List String) : IO UInt32 := do
     let (s, e) := match declRangeExt.find? env name with
       | some r => (r.range.pos.line, r.range.endPos.line)
       | none => (0, 0)
-    let deps := ci.getUsedConstants.map toString
-    h.putStrLn s!"{name}\t{mod}\t{s}\t{e}\t{isMetaType ci.type}\t{" ".intercalate deps.toList}"
+    let deps := ci.getUsedConstantsAsSet.foldl (fun acc c => acc.push (toString c)) (#[] : Array String)
+    let tdeps := ci.type.getUsedConstants.map toString
+    h.putStrLn s!"{name}\t{mod}\t{s}\t{e}\t{isMetaType ci.type}\t{" ".intercalate deps.toList}\t{" ".intercalate tdeps.toList}"
     n := n + 1
   IO.eprintln s!"dumped {n} constants"
   return 0

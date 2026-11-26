@@ -5,6 +5,9 @@ Whole project, one pass (for millions of lines; needs the project built):
     SLOP_DESTROYER graph --root ~/myproj --module MyProj --keep MyProj.main_theorem
     SLOP_DESTROYER graph ... --write --verify
 
+Whole project, no compiler at all (follows names through the source):
+    SLOP_DESTROYER static --root ~/myproj --keep MyProj.main_theorem
+
 One file, down to the tactic line (one compile per attempt):
     SLOP_DESTROYER probe Foo.lean --keep main_theorem
 """
@@ -46,6 +49,12 @@ def cmd_graph(args) -> None:
     run(args)
 
 
+def cmd_static(args) -> None:
+    from .static import run
+
+    run(args)
+
+
 def main(argv: list[str] | None = None) -> None:
     ap = argparse.ArgumentParser(prog=BANNER, description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     sub = ap.add_subparsers(dest="cmd", required=True)
@@ -77,6 +86,15 @@ def main(argv: list[str] | None = None) -> None:
     g.add_argument("--build", default="lake build")
     g.add_argument("--rounds", type=int, default=3)
     g.set_defaults(func=cmd_graph)
+
+    s = sub.add_parser("static", help="whole project, no compiler at all: follow names through the source")
+    s.add_argument("--root", required=True, help="project directory")
+    s.add_argument("--keep", action="append", required=True, help="theorem to keep (repeatable)")
+    s.add_argument("--include", action="append", help="only these subdirectories/files of --root (e.g. Mathlib)")
+    s.add_argument("--show", type=int, default=0, help="list the first N deletions")
+    s.add_argument("--write", action="store_true", help="actually edit the files")
+    s.add_argument("-j", "--jobs", type=int, default=0)
+    s.set_defaults(func=cmd_static)
 
     args = ap.parse_args(argv)
     args.func(args)

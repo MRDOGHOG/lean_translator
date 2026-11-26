@@ -39,6 +39,7 @@ class Const:
     end: int
     meta: bool
     deps: list[str]
+    type_deps: list[str] = field(default_factory=list)
 
 
 @dataclass
@@ -62,10 +63,10 @@ def load_graph(path: Path) -> dict[str, Const]:
     with open(path, encoding="utf-8") as f:
         for line in f:
             parts = line.rstrip("\n").split("\t")
-            if len(parts) < 6:
-                parts += [""] * (6 - len(parts))
-            name, mod, s, e, meta, deps = parts[:6]
-            g[name] = Const(name, mod, int(s or 0), int(e or 0), meta == "true", deps.split() if deps else [])
+            if len(parts) < 7:
+                parts += [""] * (7 - len(parts))
+            name, mod, s, e, meta, deps, tdeps = parts[:7]
+            g[name] = Const(name, mod, int(s or 0), int(e or 0), meta == "true", deps.split(), tdeps.split())
     return g
 
 
@@ -93,6 +94,39 @@ def plan(root: Path, g: dict[str, Const], targets: list[str], keep_modules: list
     # Machinery that runs during checking but leaves no trace in proof terms.
     roots += [c.name for c in g.values() if c.meta or any(c.module.startswith(m) for m in keep_modules)]
     keep = reachable(g, roots)
+
+    # The finished proof isn't the whole story: the *source* of a kept proof may
+    # name things its final term doesn't use (`simp [helper]` where helper turned
+    # out unnecessary).  Deleting those would leave "unknown identifier" errors,
+    # so also keep whatever kept source names, and repeat until nothing changes.
+    from .static import Resolver, scan_file
+
+    files = sorted({module_path(root, c.module) for c in g.values()})
+    items = [it for f in files if f.exists() for it in scan_file(str(f))]
+    R = Resolver(items)
+    by_name = {n: k for k, it in enumerate(items) for n in it.names}
+    # Declarations usable without a trace even in the proof term (rfl simp lemmas
+    # used by dsimp, instances, ext lemmas, ...): keep them whenever their
+    # statement mentions something kept, like static mode does.
+    invisible = [n for n, c in g.items() if n in by_name and items[by_name[n]].invisible]
+    while True:
+        woken = [n for n in invisible if n not in keep
+                 and (not any(d in g for d in g[n].type_deps) or any(d in keep for d in g[n].type_deps))]
+        if woken:
+            keep |= reachable(g, woken)
+            continue
+        kept_items = {by_name[n] for n in keep if n in by_name}
+        named: set[str] = set()
+        for k in kept_items:
+            it = items[k]
+            for ident, dotted in it.refs:
+                now, _ = R.resolve(ident, dotted, it.ctx)
+                for i in now:
+                    named.update(n for n in items[i].names if n in g)
+        new = named - keep
+        if not new:
+            break
+        keep |= reachable(g, list(new))
 
     by_module: dict[str, list[Const]] = defaultdict(list)
     for c in g.values():
@@ -168,6 +202,7 @@ _UNKNOWN = re.compile(r"unknown (?:identifier|constant|declaration) '([^']+)'")
 
 
 def verify_and_repair(root: Path, p: Plan, originals: dict[Path, str], build_cmd: list[str], rounds: int) -> bool:
+    rounds = max(rounds, 2 + sum(len(v) for v in p.deleted_spans.values()).bit_length())
     """Build once; if errors name deleted declarations, restore those and rebuild."""
     for k in range(rounds):
         t0 = time.time()
@@ -178,6 +213,20 @@ def verify_and_repair(root: Path, p: Plan, originals: dict[Path, str], build_cmd
             return True
         wanted = set(_UNKNOWN.findall(log))
         restored = 0
+        if not wanted:
+            # The error doesn't say what's missing: put back half of the deletions and retry.
+            spans = [(path, s) for path, dels in p.deleted_spans.items() for s in dels]
+            half = set(id(s) for _, s in spans[: (len(spans) + 1) // 2])
+            for path, dels in list(p.deleted_spans.items()):
+                p.deleted_spans[path] = [s for s in dels if id(s) not in half]
+            restored = len(half)
+            print(f"[verify] build failed without naming a declaration; restoring {restored} of "
+                  f"{len(spans)} deletions", file=sys.stderr)
+            for path, text in originals.items():
+                path.write_text(text, encoding="utf-8")
+            for path, text in apply(p).items():
+                path.write_text(text, encoding="utf-8")
+            continue
         for path, dels in list(p.deleted_spans.items()):
             keep_back = [s for s in dels
                          if any(n in wanted or n.rsplit(".", 1)[-1] in {w.rsplit(".", 1)[-1] for w in wanted}
@@ -199,7 +248,9 @@ def verify_and_repair(root: Path, p: Plan, originals: dict[Path, str], build_cmd
 def run(args) -> None:
     root = Path(args.root).resolve()
     lean_cmd = args.lean.split()
-    dump = Path(args.graph) if args.graph else root / ".slop_destroyer_graph.tsv"
+    import tempfile
+
+    dump = Path(args.graph) if args.graph else Path(tempfile.gettempdir()) / f"slop_destroyer_graph_{os.getpid()}.tsv"
     if not args.graph:
         dump_graph(root, args.module, args.prefix or [m.split(".")[0] for m in args.module], lean_cmd, dump)
     g = load_graph(dump)

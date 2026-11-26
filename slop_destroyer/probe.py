@@ -71,27 +71,30 @@ class Oracle:
         return v
 
     def _parse(self, out: str, code: int, probe_start: int) -> Verdict:
-        msgs: list[tuple[int, str, str]] = []
-        for line in out.split("\n"):
+        # Errors/warnings carry "file:line:col:"; plain info output (#check, #print) doesn't.
+        lines = out.split("\n")
+        errors = []
+        for k, line in enumerate(lines):
             m = _MSG.match(line)
-            if m:
-                msgs.append((int(m.group(2)), m.group(4), m.group(5)))
-            elif msgs:
-                ln, sev, body = msgs[-1]
-                msgs[-1] = (ln, sev, body + "\n" + line)
-        errors = [f"{ln}: {body}" for ln, sev, body in msgs if sev == "error"]
-        probe = [body for ln, sev, body in msgs if ln > probe_start and sev == "info"]
+            if m and m.group(4) == "error":
+                errors.append(f"{m.group(2)}: {m.group(5)}")
         statements: dict[str, str] = {}
         sorry: dict[str, bool] = {}
         for t in self.targets:
-            # The `#check` answer starts with the (pp.all) name; the axioms answer mentions 't'.
             short = t.rsplit(".", 1)[-1]
-            for body in probe:
-                if "depends on axioms" in body or "does not depend on any axioms" in body:
-                    if f"'{t}'" in body or f"'{short}'" in body:
-                        sorry[t] = "sorryAx" in body
-                elif body.lstrip("@").startswith((t, short)) and t not in statements:
-                    statements[t] = body.strip()
+            ax = re.search(rf"'(?:{re.escape(t)}|{re.escape(short)})' (depends on axioms: \[([^\]]*)\]|does not depend on any axioms)", out)
+            if ax:
+                sorry[t] = "sorryAx" in (ax.group(2) or "")
+            for k, line in enumerate(lines):
+                if _MSG.match(line):
+                    continue
+                if line.startswith((f"{t} :", f"@{t} :", f"{short} :", f"@{short} :")):
+                    block = [line]
+                    for nxt in lines[k + 1:]:
+                        if not nxt.startswith(" "):
+                            break
+                        block.append(nxt)
+                    statements[t] = "\n".join(block).strip()
         ok = code == 0 and not errors and all(t in statements and t in sorry for t in self.targets)
         return Verdict(ok, statements, sorry, errors)
 
