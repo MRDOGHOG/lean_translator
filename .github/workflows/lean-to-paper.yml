@@ -1,0 +1,121 @@
+# The guided tour of a Lean proof as a paper-style PDF: the rules organise the
+# book and translate all the mathematics; a local model run with Ollama (on
+# GitHub's machine) then smooths the wording. The model only sees placeholders
+# for formulas and references, and any rewrite that changes one is rejected.
+name: Lean to paper (rules + Ollama wording)
+
+on:
+  workflow_dispatch:
+    inputs:
+      model:
+        default: qwen2.5:3b
+      results:
+        default: "400"
+  push:
+    branches: [claude/optimistic-tesla-pw5s77]
+    paths: ["lean_translator/polish.py", ".github/workflows/lean-to-paper.yml", ".github/paper-run"]
+
+permissions:
+  contents: write  # the PDF is committed to books/ on this branch
+
+jobs:
+  paper:
+    runs-on: ubuntu-latest
+    timeout-minutes: 340
+    env:
+      REPO: lsernau/grh-lean
+      SUBDIR: grh-compact
+      MODEL: ${{ inputs.model || 'qwen2.5:3b' }}
+      RESULTS: ${{ inputs.results || '400' }}
+      HEADLINE: riemannHypothesis riemannZeta_eq_zero_re LFunction_ne_zero_of_half_lt_re LFunction_eq_zero_re LFunction_eq_zero_re_of_isPrimitive
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          path: tool
+      - uses: actions/checkout@v4
+        with:
+          repository: ${{ env.REPO }}
+          path: target
+          fetch-depth: 1
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Restore accepted rewrites from earlier runs
+        uses: actions/cache/restore@v4
+        with:
+          path: polish-cache.json
+          key: polish-${{ env.MODEL }}-${{ github.run_id }}
+          restore-keys: polish-${{ env.MODEL }}-
+
+      - name: Install LuaLaTeX
+        run: |
+          sudo apt-get update -qq
+          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -qq --no-install-recommends \
+            texlive-luatex texlive-latex-recommended texlive-latex-extra texlive-pictures \
+            texlive-fonts-recommended fonts-dejavu-core lmodern poppler-utils > /dev/null
+
+      - name: Install Ollama and the model
+        run: |
+          curl -fsSL https://ollama.com/install.sh | sh > /dev/null
+          if ! curl -fs http://localhost:11434/api/tags > /dev/null; then
+            (ollama serve > ollama.log 2>&1 &)
+            for i in $(seq 1 30); do curl -fs http://localhost:11434/api/tags > /dev/null && break; sleep 2; done
+          fi
+          ollama pull "$MODEL"
+          ollama list
+          nproc
+
+      - name: Write the paper (rules), then smooth the wording (Ollama)
+        working-directory: target/${{ env.SUBDIR }}
+        env:
+          PYTHONPATH: ${{ github.workspace }}/tool
+        run: |
+          mkdir -p ../../out
+          src=$( [ -d src ] && echo src || echo . )
+          python -m lean_translator latex "$src" -o ../../out/rh-paper.tex --tour "$RESULTS" \
+            --title "The Riemann Hypothesis proof, in English" \
+            --first Main.lean New/Main.lean --headline $HEADLINE \
+            --polish "$MODEL" --polish-cache ../../polish-cache.json --polish-minutes 240 2>&1 | tee ../../out/stats.txt
+
+      - name: Save accepted rewrites (reruns reuse them)
+        if: always()
+        uses: actions/cache/save@v4
+        with:
+          path: polish-cache.json
+          key: polish-${{ env.MODEL }}-${{ github.run_id }}
+
+      - name: Typeset
+        working-directory: out
+        run: |
+          for pass in 1 2; do lualatex -interaction=nonstopmode rh-paper.tex > run$pass.log 2>&1 || true; done
+          pages=$(pdfinfo rh-paper.pdf 2>/dev/null | awk '/^Pages/{print $2}')
+          errs=$(grep -c '^! ' rh-paper.log || true)
+          echo "rh-paper.pdf: ${pages:-no PDF} pages, $errs LaTeX errors" | tee -a stats.txt
+          grep -m 10 -A 3 '^! ' rh-paper.log || true
+          { echo '```'; cat stats.txt; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Commit the PDF to books/
+        working-directory: tool
+        run: |
+          mkdir -p books
+          cp ../out/rh-paper.pdf books/ && cp ../out/stats.txt books/paper-stats.txt
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add books
+          git commit -m "books: RH proof as a paper (rules + Ollama wording)" || exit 0
+          for i in 1 2 3 4; do
+            git pull --rebase -q origin "${GITHUB_REF_NAME}" && git push -q origin "HEAD:${GITHUB_REF_NAME}" && break
+            sleep $((i * 5))
+          done
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: rh-paper
+          path: |
+            out/rh-paper.pdf
+            out/rh-paper.tex
+            out/stats.txt
+          retention-days: 30

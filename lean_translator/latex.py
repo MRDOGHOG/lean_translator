@@ -375,20 +375,32 @@ def _words(text: str, local_words: set[str]) -> str:
     return "".join(out)
 
 
-def statement_tex(d: Decl) -> str:
-    """The English statement with every formula typeset."""
+def statement_marked(d: Decl) -> str:
+    """The English statement with formulas as \\x01<LaTeX>\\x02 segments (see render_marked)."""
     tr = gloss_decl(d)
     locals_ = {x for b in d.binders + d.context for x in b.names}
     masked = re.sub(r"^\w+ [^:]+: ", "", tr.masked)  # the heading names it already
-    out, pos = [], 0
-    for m in _SLOT_RE.finditer(masked):
+
+    def sub(m: re.Match) -> str:
         k = int(m.group(1))
-        out.append(_words(masked[pos:m.start()], locals_))
         node = tr.slot_nodes[k] if k < len(tr.slot_nodes) else None
-        out.append(f"${tex_math(node, locals_)}$" if node is not None else esc(tr.slots[k]))
-        pos = m.end()
-    out.append(_words(masked[pos:], locals_))
-    return "".join(out)
+        return "\x01" + tex_math(node, locals_) + "\x02" if node is not None else tr.slots[k]
+
+    return _SLOT_RE.sub(sub, masked)
+
+
+def statement_tex(d: Decl) -> str:
+    """The English statement with every formula typeset."""
+    locals_ = {x for b in d.binders + d.context for x in b.names}
+    marked = statement_marked(d)
+    if POLISHER is not None:
+        smooth = POLISHER.statement(marked)
+        if smooth:
+            marked = smooth
+    return render_marked(marked, locals_)
+
+
+POLISHER = None  # set by write_book(polish=...): a polish.Polisher
 
 
 # ---------------------------------------------------------------- document
@@ -597,6 +609,12 @@ def decl_tex(d: Decl, tactic_counts: Counter, proof_lengths: list[int], means: d
     if steps:
         proof_lengths.append(len(steps))
         locals_ = {x for b in d.binders + d.context for x in b.names}
+        smooth = POLISHER.proof(steps) if POLISHER is not None and len(steps) <= 40 else None
+        if smooth:
+            paras = [render_marked(par.strip(), locals_) for par in re.split(r"\n\s*\n", smooth) if par.strip()]
+            out.append(r"\par\smallskip\noindent\textit{Proof.} " + "\n\n".join(paras)
+                       + r"\hfill\rule{0.55em}{0.55em}\par")
+            return "\n".join(out)
         if all(dp == 0 for dp, _ in steps) and len(steps) <= 6:
             out.append(r"\par\smallskip\noindent\textit{Proof.} "
                        + " ".join(render_marked(s, locals_) for _, s in steps) + r"\hfill\rule{0.55em}{0.55em}\par")
@@ -654,7 +672,13 @@ def _set_refs(names: dict[str, str], by_name: dict[str, Decl]) -> None:
 
 
 def write_book(src_dir: str, output: str, title: str, first: list[str], headline: list[str],
-               max_files: int = 0, tour: int = 0) -> dict:
+               max_files: int = 0, tour: int = 0, polish: str = "", polish_cache: str = "",
+               polish_minutes: float = 0, ollama_host: str = "http://localhost:11434") -> dict:
+    global POLISHER
+    if polish:
+        from .polish import Polisher
+
+        POLISHER = Polisher(polish, ollama_host, polish_cache or None, polish_minutes * 60)
     root = Path(src_dir)
     paths = sorted(p for p in root.rglob("*.lean") if ".lake" not in p.parts)
     files = {str(p.relative_to(root)): p.read_text(encoding="utf-8", errors="replace") for p in paths}
@@ -787,7 +811,13 @@ def write_book(src_dir: str, output: str, title: str, first: list[str], headline
         r"goal; \emph{Simplify using \dots} means simplification with the listed facts; \emph{Rewrite using "
         r"\dots} means replacing equals by equals. Text in \leanc{this font} is Lean code that no rule covers yet. "
         r"The steps say what was done, not why it works: that is in the Lean proof, which Lean has checked.",
-    ] + ([r"\par\medskip This volume is a \emph{guided tour}: the chapter \emph{The main theorems} comes first, then the "
+    ] + ([r"\par\medskip\textbf{Wording.} The organisation, every formula and every reference come from the "
+          r"rules. A local language model (%s, run with Ollama) then rewrote the wording of statements and proofs "
+          r"into smoother prose. It never saw the formulas or references, only placeholders for them, and a rewrite "
+          r"was kept only if every placeholder came back unchanged (%d rewrites kept, %d rejected and left as the "
+          r"rule-based text). The mathematics is therefore exactly the rule-based translation of the Lean."
+          % (esc(polish), POLISHER.stats["accepted"] + POLISHER.stats["cached"], POLISHER.stats["rejected"])]
+         if POLISHER is not None else []) + ([r"\par\medskip This volume is a \emph{guided tour}: the chapter \emph{The main theorems} comes first, then the "
           r"results their proofs use, and each later chapter what the previous one uses, until the size limit of "
           r"the volume. The full book has everything."] if tour and roots else [])
     overview = how_to_read + [
@@ -822,5 +852,10 @@ def write_book(src_dir: str, output: str, title: str, first: list[str], headline
            r"\begin{document}", r"\maketitle", r"\tableofcontents"] + overview + body_parts + [r"\end{document}"]
     with open(output, "w", encoding="utf-8") as f:
         f.write("\n".join(doc) + "\n")
-    return {"files": len(order), "declarations": n_decls, "proofs": len(proof_lengths),
+    polish_stats = None
+    if POLISHER is not None:
+        POLISHER.save()
+        polish_stats = dict(POLISHER.stats)
+        POLISHER = None
+    return {"polish": polish_stats, "files": len(order), "declarations": n_decls, "proofs": len(proof_lengths),
             "steps": sum(proof_lengths), "headline_found": roots}

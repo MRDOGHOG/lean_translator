@@ -177,3 +177,21 @@ def test_latex_formulas():
     assert t("x ^ 2 ≤ ‖y‖") == r"{x}^{2} \le \left\lVert y \right\rVert"
     assert r"\sum_{i \in s}" in t("∑ i ∈ s, f i")
     assert t("Real.sqrt x") == r"\sqrt{x}"
+
+
+def test_polish_keeps_math_and_rejects_tampering():
+    from lean_translator.polish import Polisher, acceptable, mask, unmask
+
+    marked = "Let \x01n\x02 be a natural number. Assume that 2 is at most \x01n\x02. Then \x01n \\le n^2\x02."
+    masked, table = mask(marked)
+    assert masked == "Let [M1] be a natural number. Assume that 2 is at most [M2]. Then [M3]."
+    assert unmask(masked, table) == marked
+
+    good = Polisher("fake", chat=lambda s, u: "For every natural number [M1] with 2 at most [M2], we have [M3].")
+    out = good.statement(marked)
+    assert out == "For every natural number \x01n\x02 with 2 at most \x01n\x02, we have \x01n \\le n^2\x02."
+    dropped = Polisher("fake", chat=lambda s, u: "For every natural number [M1], we have [M3].")
+    assert dropped.statement(marked) is None and dropped.stats["rejected"] == 1
+    invented = Polisher("fake", chat=lambda s, u: "Here is [M1] [M2] [M3] [M4].")
+    assert invented.statement(marked) is None
+    assert not acceptable(masked, "Let $n$ be [M1] [M2] [M3]", table)  # raw math smuggled in
