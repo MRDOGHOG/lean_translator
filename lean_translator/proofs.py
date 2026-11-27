@@ -162,18 +162,20 @@ class _Math:
         c = self.cite(toks)
         if c:
             return c
-        ids = [t.text for t in toks if t.kind == "ident"]
+        ids = [t.text for t in toks if t.kind == "ident" and t.text not in _NOT_NAMES]
         if ids and all(x in self.g.locals for x in ids):
-            return "combining " + _list([f"`{x}`" for x in dict.fromkeys(ids)])
+            return _list([f"`{x}`" for x in dict.fromkeys(ids)])
         return "a direct computation"
 
     def cite(self, toks: list[Token]) -> str:
         """`foo (bar x) h` -> "Lemma 3.2 and Lemma 1.4" / "the standard result Nat.exists_prime_and_dvd"."""
         ours, lib = [], []
         for t in toks:
-            if t.kind != "ident" or t.text in self.g.locals:
+            if t.kind != "ident" or t.text in self.g.locals or t.text in _NOT_NAMES:
                 continue
             name = t.text.lstrip("@")
+            if not name or name[:1].isdigit() or name.startswith(".") or name.rsplit(".", 1)[-1].isdigit():
+                continue
             full = REFS.get(name) or REFS.get(name.rsplit(".", 1)[-1])
             if full:
                 if full not in ours:
@@ -232,7 +234,8 @@ class _Math:
             return self.code(toks)
 
     def names(self, toks: list[Token]) -> list[str]:
-        return [t.text for t in toks if t.kind == "ident" and t.text not in ("with", "at", "using", "only", "_")]
+        return [t.text for t in toks if t.kind == "ident" and t.text not in _NOT_NAMES and t.text != "_"
+                and not t.text[:1].isdigit() and not t.text.startswith(".")]
 
 
 def _split_at(toks: list[Token], word: str) -> tuple[list[Token], list[Token] | None]:
@@ -294,6 +297,10 @@ def _loc(toks: list[Token], m: _Math) -> str:
     return " in " + _list([("the goal" if n == "⊢" else f"`{n}`") for n in names])
 
 
+_NOT_NAMES = {"fun", "have", "show", "from", "by", "with", "at", "using", "only", "intro", "intros", "by_cases",
+              "by_contra", "exact", "apply", "refine", "simp", "rw", "obtain", "let", "if", "then", "else", "match",
+              "this", "rfl", "trivial", "id", "le_total", "le_rfl", "le_refl", "lt_irrefl", "absurd", "False.elim",
+              "Or.inl", "Or.inr", "And.intro", "Exists.intro", "congrArg", "congr_arg", "funext", "mt", "fst", "snd"}
 REFS: dict[str, str] = {}  # Lean name (full or short) -> full name of a result in the book (set by the writer)
 STATEMENTS: dict[str, Decl] = {}  # full name -> declaration, to quote what a cited result gives
 
@@ -392,7 +399,8 @@ def _sentence(toks: list[Token], m: _Math) -> str:
         if (head in ("let", "obtain") or head == "have") and name_toks and name_toks[0].text == "⟨" and proof:
             return _obtain(proof, names, _list([f"`{n}`" for n in names]) or "the pieces", m)
         if head == "set" or head == "let":
-            return f"Let {code(name_toks)} denote {m.prop(proof or [])}." if proof else f"Let {code(lhs)}."
+            shown = _list([f"`{n}`" for n in names]) or code(name_toks)
+            return f"Let {shown} denote {m.prop(proof or [])}." if proof else f"Let {shown} be as above."
         if stmt is None:  # `have h := foo x`
             return f"Note {code(proof or [])}{label}."
         how = ""
@@ -410,10 +418,19 @@ def _sentence(toks: list[Token], m: _Math) -> str:
         return f"It suffices to show that {m.prop(stmt if stmt is not None else name_toks)}."
     if head in ("exact", "exacts"):
         c = code(rest)
-        return f"This follows by {c}." if c.startswith("combining") else f"This follows from {c}."
+        ids = [t.text for t in rest if t.kind == "ident" and t.text not in _NOT_NAMES]
+        if m.tex and len(ids) > 1 and all(x in m.g.locals for x in ids):
+            return f"This follows by combining {c}."
+        return f"This follows from {c}."
     if head in ("apply", "refine", "refine'", "apply_rules"):
         if rest and rest[0].text == "⟨":
+            if m.tex:
+                c = code(rest)
+                return f"We build the required object from {c}." if c != "a direct computation" else \
+                    "We build the required object piece by piece."
             return f"Build the required object piece by piece: {code(rest)}."
+        if m.tex:
+            return f"We apply {code(rest)}; it remains to verify its hypotheses."
         return f"Apply {code(rest)}; it remains to check its hypotheses."
     if head in ("grw", "nth_grw", "gcongr_rw"):
         items = _bracket_items(rest if rest and rest[0].text == "[" else rest[1:], m)
@@ -478,7 +495,10 @@ def _sentence(toks: list[Token], m: _Math) -> str:
     if head in ("constructor", "split_ands"):
         return "Prove each part separately."
     if head in ("use", "exists", "existsi"):
-        return f"Take {code(rest)}."
+        c = code(rest)
+        if m.tex and ("\x03" in c or "standard" in c):
+            return f"We take the witness provided by {c}."
+        return f"Take {c}."
     if head == "left":
         return "Prove the first alternative."
     if head == "right":
