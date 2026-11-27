@@ -67,6 +67,19 @@ jobs:
           echo "keeping: $keep"
           echo "keep=$keep" >> "$GITHUB_OUTPUT"
 
+      - name: Where is the proof
+        run: |
+          sha=$(git -C target rev-parse HEAD)
+          python -m slop_destroyer.find_theorems target RiemannHypothesis --where \
+            "https://github.com/$TARGET_REPO/blob/$sha" | tee where.txt
+          {
+            echo "## Where the proof is"; echo; echo '```'; head -c 60000 where.txt; echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+          # what the theorem's own file imports (the next layer of the proof)
+          for f in $(grep -oE 'at  [^:]+' where.txt | cut -c5- | sort -u); do
+            echo "--- imports of $f:"; grep -E '^(public )?import ' "target/$f" || true
+          done
+
       - name: Run SLOP_DESTROYER (static mode)
         run: |
           args=()
