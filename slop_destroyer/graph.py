@@ -207,6 +207,8 @@ def apply(p: Plan) -> dict[Path, str]:
     deleted_names = {n for names in p.names_by_span.values() for n in names}
     out = {}
     for path, dels in p.deleted_spans.items():
+        if not dels:
+            continue  # everything here was restored: leave the file byte-for-byte as it was
         src = path.read_text(encoding="utf-8")
         out[path] = drop_attributes(render(src, dels), deleted_names)
     return out
