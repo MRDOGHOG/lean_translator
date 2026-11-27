@@ -305,7 +305,15 @@ def esc_code(s: str) -> str:
     return "".join(_TEXT_ESC.get(ch, ch) for ch in s)
 
 
-_MARK = re.compile("\x01(.*?)\x02|`([^`]+)`", re.S)
+_MARK = re.compile("\x01(.*?)\x02|`([^`]+)`|\x03(.*?)\x04|\x05(.*?)\x06", re.S)
+NUMBERS: dict[str, str] = {}  # full name -> "Lemma 3.4"
+
+
+def cite_tex(full: str) -> str:
+    """A cited result: its number, linked, if it is in this volume; else its short name."""
+    if full in NUMBERS:
+        return r"\hyperlink{%s}{\color{linkblue}%s}" % (anchor(full), NUMBERS[full].replace(" ", "~"))
+    return r"\textsf{%s}" % esc_code(full.rsplit(".", 1)[-1])
 
 
 LINKS: dict[str, str] = {}  # Lean name (full or short) -> full name of a declaration in the book
@@ -334,7 +342,18 @@ def render_marked(s: str, local_words: set[str] = frozenset()) -> str:
     out, pos = [], 0
     for m in _MARK.finditer(s):
         out.append(_words(s[pos:m.start()], local_words))
-        out.append(f"${m.group(1)}$" if m.group(1) is not None else link_code(m.group(2)))
+        if m.group(1) is not None:
+            out.append(f"${m.group(1)}$")
+        elif m.group(2) is not None:
+            c = m.group(2)
+            if re.fullmatch(r"[^\W\d_][\w'₀-₉]{0,2}", c) and c not in LINKS:  # a variable: italic math
+                out.append(f"${_ident(c, len(c) > 1)}$")
+            else:
+                out.append(link_code(c))
+        elif m.group(3) is not None:
+            out.append(cite_tex(m.group(3)))
+        else:
+            out.append(r"\textsf{%s}" % esc_code(m.group(4).rsplit(".", 1)[-1]))
         pos = m.end()
     out.append(_words(s[pos:], local_words))
     return "".join(out)
@@ -558,14 +577,19 @@ def decl_tex(d: Decl, tactic_counts: Counter, proof_lengths: list[int], means: d
         readable = gloss_name(name)
     except Exception:
         readable = ""
-    head = r"\textbf{%s} \leanc{%s}" % (kind, esc_code(name))
+    number = NUMBERS.get(name)
+    title = number or kind
+    head = r"\textbf{%s}" % esc(title)
     if readable and readable.lower() != name.lower():
-        head += r"\hfill{\small\itshape %s}" % esc(readable)
+        head += r" \textit{(%s)}" % esc(readable)
+    head += r"\hfill{\scriptsize\color{black!55}\leanc{%s}}" % esc_code(name)
     out = [r"\hypertarget{%s}{}%%" % anchor(name), r"\begin{leanbox}", head + r"\par\smallskip", stmt, r"\end{leanbox}"]
     if uses:
-        out.append(r"\refsline{Uses}{%s}" % _ref_list(uses))
+        out.append(r"\refsline{Uses}{%s}" % ", ".join(cite_tex(u) for u in uses[:10])
+                   + (f", and {len(uses) - 10} more" if len(uses) > 10 else ""))
     if used_by:
-        out.append(r"\refsline{Used by}{%s}" % _ref_list(used_by))
+        out.append(r"\refsline{Used by}{%s}" % ", ".join(cite_tex(u) for u in used_by[:10])
+                   + (f", and {len(used_by) - 10} more" if len(used_by) > 10 else ""))
     try:
         steps = narrate(d, Glosser(), tex=True)
     except Exception:
@@ -573,6 +597,10 @@ def decl_tex(d: Decl, tactic_counts: Counter, proof_lengths: list[int], means: d
     if steps:
         proof_lengths.append(len(steps))
         locals_ = {x for b in d.binders + d.context for x in b.names}
+        if all(dp == 0 for dp, _ in steps) and len(steps) <= 6:
+            out.append(r"\par\smallskip\noindent\textit{Proof.} "
+                       + " ".join(render_marked(s, locals_) for _, s in steps) + r"\hfill\rule{0.55em}{0.55em}\par")
+            return "\n".join(out)
         out.append(r"\begin{leanproof}")
         out.append(r"\begin{enumerate}")
         level = 0
@@ -614,6 +642,15 @@ def _proof_mentions(d: Decl, project_names: dict[str, str]) -> list[str]:
             if full and full != d.full_name and full not in out:
                 out.append(full)
     return out
+
+
+def _set_refs(names: dict[str, str], by_name: dict[str, Decl]) -> None:
+    from . import proofs
+
+    proofs.REFS.clear()
+    proofs.REFS.update(names)
+    proofs.STATEMENTS.clear()
+    proofs.STATEMENTS.update(by_name)
 
 
 def write_book(src_dir: str, output: str, title: str, first: list[str], headline: list[str],
@@ -685,11 +722,15 @@ def write_book(src_dir: str, output: str, title: str, first: list[str], headline
         shown = set(level)
         LINKS.clear()
         LINKS.update({k: v for k, v in names.items() if v in shown})
+        _set_refs(names, by_name)
         titles = {0: "The main theorems", 1: "What the main theorems are proved from"}
-        for lv in range(max(level.values()) + 1):
-            members = [n for n in level if level[n] == lv]
-            if not members:
-                continue
+        chapters = [[n for n in level if level[n] == lv] for lv in range(max(level.values()) + 1)]
+        chapters = [c for c in chapters if c]
+        NUMBERS.clear()
+        for ci, members in enumerate(chapters, start=2):  # chapter 1 is the overview
+            for k, n in enumerate(members, start=1):
+                NUMBERS[n] = f"{_KIND.get(by_name[n].kind, 'Result')} {ci}.{k}"
+        for lv, members in enumerate(chapters):
             body_parts.append(r"\chapter{%s}" % (titles.get(lv) or f"Level {lv}: what level {lv - 1} uses"))
             for n in members:
                 d = by_name[n]
@@ -701,6 +742,17 @@ def write_book(src_dir: str, output: str, title: str, first: list[str], headline
     else:
         LINKS.clear()
         LINKS.update(names)
+        by_name = {d.full_name: d for ds in decls.values() for d in ds if d.full_name}
+        _set_refs(names, by_name)
+        NUMBERS.clear()
+        ci, k, prev = 1, 0, None
+        for rel in order:
+            if _area(rel) != prev:
+                ci, k, prev = ci + 1, 0, _area(rel)
+            for d in decls[rel]:
+                if d.full_name:
+                    k += 1
+                    NUMBERS[d.full_name] = f"{_KIND.get(d.kind, 'Result')} {ci}.{k}"
         current_area = None
         for rel in order:
             area = _area(rel)

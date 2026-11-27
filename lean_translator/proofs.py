@@ -151,7 +151,45 @@ class _Math:
         return s if len(s) <= _MAX_MATH else s[: _MAX_MATH - 1] + "…"
 
     def code(self, toks: list[Token]) -> str:
-        return f"`{self.raw(toks)}`" if toks else ""
+        if not toks:
+            return ""
+        if not self.tex:
+            return f"`{self.raw(toks)}`"
+        # Paper style: never print raw Lean.  A local name stays (as a label); anything bigger is
+        # described by the results it uses.
+        if len(toks) == 1 and toks[0].kind == "ident" and toks[0].text in self.g.locals:
+            return f"`{toks[0].text}`"
+        c = self.cite(toks)
+        if c:
+            return c
+        ids = [t.text for t in toks if t.kind == "ident"]
+        if ids and all(x in self.g.locals for x in ids):
+            return "combining " + _list([f"`{x}`" for x in dict.fromkeys(ids)])
+        return "a direct computation"
+
+    def cite(self, toks: list[Token]) -> str:
+        """`foo (bar x) h` -> "Lemma 3.2 and Lemma 1.4" / "the standard result Nat.exists_prime_and_dvd"."""
+        ours, lib = [], []
+        for t in toks:
+            if t.kind != "ident" or t.text in self.g.locals:
+                continue
+            name = t.text.lstrip("@")
+            full = REFS.get(name) or REFS.get(name.rsplit(".", 1)[-1])
+            if full:
+                if full not in ours:
+                    ours.append(full)
+            elif "." in name and name[:1].isupper() and name not in lib and not name.endswith((".mp", ".mpr", ".le")):
+                lib.append(name)
+            elif "_" in name and name not in lib and len(name) > 6:
+                lib.append(name)
+        parts = ["\x03" + f + "\x04" for f in ours[:4]]
+        if len(ours) > 4:
+            parts.append(f"{len(ours) - 4} further results")
+        if lib:
+            shown = ["\x05" + x + "\x06" for x in lib[:2]]
+            parts.append(("the standard result " if len(lib) == 1 else "the standard results ") + _list(shown)
+                         + (" and others" if len(lib) > 2 else ""))
+        return _list(parts)
 
     def prop(self, toks: list[Token]) -> str:
         if not toks:
@@ -256,6 +294,42 @@ def _loc(toks: list[Token], m: _Math) -> str:
     return " in " + _list([("the goal" if n == "⊢" else f"`{n}`") for n in names])
 
 
+REFS: dict[str, str] = {}  # Lean name (full or short) -> full name of a result in the book (set by the writer)
+STATEMENTS: dict[str, Decl] = {}  # full name -> declaration, to quote what a cited result gives
+
+
+def _exists_conclusion(full: str, pattern_names: list[str], m: "_Math") -> str | None:
+    """`obtain ⟨d, e, h⟩ := lemma ...` where lemma's statement ends in `∃ x y, P x y`:
+    "there exist d and e such that P d e" (bound names replaced by the pattern's)."""
+    d = STATEMENTS.get(full)
+    if d is None or not d.type:
+        return None
+    toks = list(d.type)
+    # skip leading ∀/→ hypotheses: take the part after the last top-level → if it starts with ∃
+    k = next((i for i, t in enumerate(toks) if t.text == "∃"), None)
+    if k is None:
+        return None
+    comma = next((i for i in range(k, len(toks)) if toks[i].text == ","), None)
+    if comma is None:
+        return None
+    bound = [t.text for t in toks[k + 1:comma] if t.kind == "ident" and t.text not in ("in",)]
+    colon = [i for i in range(k, comma) if toks[i].text == ":"]
+    if colon:
+        bound = [t.text for t in toks[k + 1:colon[0]] if t.kind == "ident"]
+    body = toks[comma + 1:]
+    if body and body[0].text == "∃":  # ∃ x, ∃ y, ...: take one level only
+        return None
+    new_names = [x for x in pattern_names if not x.startswith("h")][:len(bound)]
+    if len(new_names) != len(bound):
+        new_names = bound
+    ren = dict(zip(bound, new_names))
+    from .lexer import Token as _T
+    body = [_T(t.kind, ren.get(t.text, t.text), t.line, t.col) if t.kind == "ident" else t for t in body]
+    m.g.locals.update(new_names)
+    what = m.prop(body)
+    return f"there {'is' if len(new_names) == 1 else 'are'} {_list([f'`{x}`' for x in new_names])} such that {what}"
+
+
 _AUTO = {
     "linarith": "by linear arithmetic", "nlinarith": "by nonlinear arithmetic",
     "positivity": "since the expression is positive", "ring": "by algebra (both sides are equal as polynomials)",
@@ -308,15 +382,15 @@ def _sentence(toks: list[Token], m: _Math) -> str:
         names = m.names(pat)
         m.g.locals.update(names)
         what = _list([f"`{n}`" for n in names]) or "the pieces"
-        if pat and any(t.text == ":" for t in pat[:2]) is False and pat and pat[0].text == "⟨":
-            pass
-        return f"From {code(src)} obtain {what}." if src else f"Obtain {what}."
+        return _obtain(src, names, what, m)
     if head in ("have", "haveI", "replace", "let", "set"):
         lhs, proof = _split_at(rest, ":=")
         name_toks, stmt = _split_at(lhs, ":")
         names = m.names(name_toks)
         label = f" (call it `{names[0]}`)" if names else ""
         m.g.locals.update(names)
+        if (head in ("let", "obtain") or head == "have") and name_toks and name_toks[0].text == "⟨" and proof:
+            return _obtain(proof, names, _list([f"`{n}`" for n in names]) or "the pieces", m)
         if head == "set" or head == "let":
             return f"Let {code(name_toks)} denote {m.prop(proof or [])}." if proof else f"Let {code(lhs)}."
         if stmt is None:  # `have h := foo x`
@@ -335,7 +409,8 @@ def _sentence(toks: list[Token], m: _Math) -> str:
         name_toks, stmt = _split_at(lhs, ":")
         return f"It suffices to show that {m.prop(stmt if stmt is not None else name_toks)}."
     if head in ("exact", "exacts"):
-        return f"This follows from {code(rest)}."
+        c = code(rest)
+        return f"This follows by {c}." if c.startswith("combining") else f"This follows from {c}."
     if head in ("apply", "refine", "refine'", "apply_rules"):
         if rest and rest[0].text == "⟨":
             return f"Build the required object piece by piece: {code(rest)}."
@@ -445,7 +520,13 @@ def _sentence(toks: list[Token], m: _Math) -> str:
         pat, tac = _split_at(rest, "=>")
         names = m.names(pat)
         m.g.locals.update(names[1:])
-        label = f"Case `{_detok(pat).strip()}`"
+        first = pat[0].text if pat else ""
+        if first in ("zero", "Nat.zero") and len(pat) == 1:
+            label = "Base case"
+        elif first in ("succ", "Nat.succ") and len(pat) >= 2:
+            label = f"Inductive step (from `{pat[1].text}` to `{pat[1].text}` + 1)"
+        else:
+            label = f"Case `{_detok(pat).strip()}`"
         if tac:
             return f"{label}: {_lower(_sentence(tac, m))}"
         return f"{label}:"
@@ -469,6 +550,10 @@ def _sentence(toks: list[Token], m: _Math) -> str:
     if head in ("conv", "conv_lhs", "conv_rhs"):
         return "Rewrite inside a part of the expression:"
     if head in _AUTO:
+        if m.tex:
+            phrase = _AUTO[head]
+            return ("This follows " + phrase + ".") if phrase.startswith(("by", "since", "as", "after", "up")) \
+                else _cap(phrase) + "."
         return _cap(_AUTO[head]) + "."
     # `foo <;> bar`
     left, right = _split_at(toks, "<;>")
@@ -476,6 +561,24 @@ def _sentence(toks: list[Token], m: _Math) -> str:
         return f"{_sentence(left, m).rstrip('.')}, then on every resulting goal: {_lower(_sentence(right, m))}"
     UNKNOWN[head] += 1
     return f"Apply {code(toks)}."
+
+
+def _obtain(src: list[Token] | None, names: list[str], what: str, m: "_Math") -> str:
+    if not src:
+        return f"Obtain {what}."
+    if m.tex:
+        head = next((t.text for t in src if t.kind == "ident"), "")
+        full = REFS.get(head) or REFS.get(head.rsplit(".", 1)[-1])
+        if full:
+            concl = _exists_conclusion(full, names, m)
+            hyp = [n for n in names if n.startswith("h")]
+            tag = f" (call this `{hyp[-1]}`)" if hyp and concl else ""
+            if concl:
+                return f"By \x03{full}\x04, {concl}{tag}."
+            return f"By \x03{full}\x04 we obtain {what}."
+        c = m.cite(src)
+        return f"By {c} we obtain {what}." if c else f"We obtain {what}."
+    return f"From {m.code(src)} obtain {what}."
 
 
 def _how(toks: list[Token], m: _Math) -> str:
