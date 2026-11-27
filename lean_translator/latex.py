@@ -308,12 +308,33 @@ def esc_code(s: str) -> str:
 _MARK = re.compile("\x01(.*?)\x02|`([^`]+)`", re.S)
 
 
+LINKS: dict[str, str] = {}  # Lean name (full or short) -> full name of a declaration in the book
+
+
+def anchor(full: str) -> str:
+    import hashlib
+    return "d" + hashlib.md5(full.encode()).hexdigest()[:12]
+
+
+def link_code(code: str) -> str:
+    """Lean code in typewriter font, with every name that has a page in the book made a link."""
+    out, pos = [], 0
+    for m in re.finditer(r"[A-Za-z_\u0370-\u03ff][\w.'₀-₉]*", code):
+        out.append(esc_code(code[pos:m.start()]))
+        name = m.group(0)
+        full = LINKS.get(name) or LINKS.get(name.rsplit(".", 1)[-1])
+        out.append(r"\hyperlink{%s}{\color{linkblue}%s}" % (anchor(full), esc_code(name)) if full else esc_code(name))
+        pos = m.end()
+    out.append(esc_code(code[pos:]))
+    return r"\leanc{%s}" % "".join(out)
+
+
 def render_marked(s: str, local_words: set[str] = frozenset()) -> str:
     """Text with \\x01math\\x02 and `code` segments -> LaTeX."""
     out, pos = [], 0
     for m in _MARK.finditer(s):
         out.append(_words(s[pos:m.start()], local_words))
-        out.append(f"${m.group(1)}$" if m.group(1) is not None else r"\leanc{%s}" % esc_code(m.group(2)))
+        out.append(f"${m.group(1)}$" if m.group(1) is not None else link_code(m.group(2)))
         pos = m.end()
     out.append(_words(s[pos:], local_words))
     return "".join(out)
@@ -368,10 +389,28 @@ PREAMBLE = r"""\documentclass[10pt,openany]{book}
 \setlistdepth{9}
 \renewlist{itemize}{itemize}{9}
 \setlist[itemize]{label=--,nosep,leftmargin=1.4em}
+\renewlist{enumerate}{enumerate}{9}
+\setlist[enumerate]{nosep,leftmargin=2em}
+\setlist[enumerate,1]{label=\arabic*.}
+\setlist[enumerate,2]{label=(\alph*)}
+\setlist[enumerate,3]{label=(\roman*)}
+\setlist[enumerate,4]{label=\arabic*.}
+\setlist[enumerate,5]{label=(\alph*)}
+\setlist[enumerate,6]{label=(\roman*)}
+\setlist[enumerate,7]{label=--}
+\setlist[enumerate,8]{label=--}
+\setlist[enumerate,9]{label=--}
+\usepackage{xcolor}
+\definecolor{linkblue}{RGB}{20,70,160}
+\definecolor{boxback}{RGB}{243,246,252}
+\definecolor{boxframe}{RGB}{110,130,180}
+\usepackage[breakable]{tcolorbox}
+\newtcolorbox{leanbox}{colback=boxback,colframe=boxframe,boxrule=0.4pt,arc=2pt,left=5pt,right=5pt,
+  top=3pt,bottom=3pt,breakable,before skip=10pt,after skip=4pt}
 \usepackage[hidelinks]{hyperref}
 \newcommand{\leanc}[1]{\texttt{#1}}
-\newenvironment{leandecl}[3]{\par\medskip\noindent\hypertarget{#3}{}\textbf{#1} \leanc{#2}.\ }{\par}
-\newenvironment{leanproof}{\par\noindent\textit{Proof.}\ }{\hfill\rule{0.55em}{0.55em}\par}
+\newcommand{\refsline}[2]{{\small\color{black!65}\textbf{#1:} #2\par}}
+\newenvironment{leanproof}{\par\smallskip\noindent\textit{Proof.}\par}{\hfill\rule{0.55em}{0.55em}\par}
 \sloppy\emergencystretch=4em
 \setcounter{tocdepth}{0}
 """
@@ -487,51 +526,69 @@ def proof_map_tex(roots: list[str], uses: dict[str, list[str]], max_nodes: int =
     return "\n".join(lines)
 
 
-def decl_tex(d: Decl, tactic_counts: Counter, proof_lengths: list[int], means: dict[str, str] | None = None) -> str:
-    from .proofs import narrate
+_KIND = {"theorem": "Theorem", "lemma": "Lemma", "def": "Definition", "abbrev": "Definition",
+         "structure": "Structure", "class": "Class", "inductive": "Type", "instance": "Instance",
+         "example": "Example", "axiom": "Axiom"}
 
-    kind = {"theorem": "Theorem", "lemma": "Lemma", "def": "Definition", "abbrev": "Definition",
-            "structure": "Structure", "class": "Class", "inductive": "Type", "instance": "Instance",
-            "example": "Example", "axiom": "Axiom"}.get(d.kind, d.kind.title())
+
+def _ref_list(names: list[str], limit: int = 8) -> str:
+    shown = [r"\hyperlink{%s}{\color{linkblue}\leanc{%s}}" % (anchor(n), esc_code(n.rsplit(".", 1)[-1]))
+             for n in names[:limit]]
+    more = len(names) - limit
+    return ", ".join(shown) + (f", and {more} more" if more > 0 else "")
+
+
+def decl_tex(d: Decl, tactic_counts: Counter, proof_lengths: list[int], means: dict[str, str] | None = None,
+             uses: list[str] | None = None, used_by: list[str] | None = None) -> str:
+    from .gloss import gloss_name
+    from .proofs import narrate, prop_name
+
+    kind = _KIND.get(d.kind, d.kind.title())
     name = d.full_name or "(unnamed)"
     try:
         stmt = statement_tex(d)
     except Exception:
         stmt = r"\leanc{%s}" % esc_code(d.signature[:400])
-    from .proofs import prop_name
-
     pn = prop_name(d)
     if pn and means:
         meaning = means.get(pn) or means.get(pn.rsplit(".", 1)[-1])
         if meaning:
             stmt += r" Here, \emph{%s} means: %s" % (esc(pn), meaning)
-    out = [r"\begin{leandecl}{%s}{%s}{%s}" % (kind, esc_code(name), esc_code(name)), stmt, r"\end{leandecl}"]
+    try:
+        readable = gloss_name(name)
+    except Exception:
+        readable = ""
+    head = r"\textbf{%s} \leanc{%s}" % (kind, esc_code(name))
+    if readable and readable.lower() != name.lower():
+        head += r"\hfill{\small\itshape %s}" % esc(readable)
+    out = [r"\hypertarget{%s}{}%%" % anchor(name), r"\begin{leanbox}", head + r"\par\smallskip", stmt, r"\end{leanbox}"]
+    if uses:
+        out.append(r"\refsline{Uses}{%s}" % _ref_list(uses))
+    if used_by:
+        out.append(r"\refsline{Used by}{%s}" % _ref_list(used_by))
     try:
         steps = narrate(d, Glosser(), tex=True)
     except Exception:
         steps = []
     if steps:
         proof_lengths.append(len(steps))
-        for t in d.proof[2:]:
-            if t.kind == "ident" and t.col > 0:
-                pass
         locals_ = {x for b in d.binders + d.context for x in b.names}
         out.append(r"\begin{leanproof}")
-        out.append(r"\begin{itemize}")
+        out.append(r"\begin{enumerate}")
         level = 0
         for depth, s in steps:
             depth = min(depth, 8)
             while level < depth:
-                out.append(r"\begin{itemize}")
+                out.append(r"\begin{enumerate}")
                 level += 1
             while level > depth:
-                out.append(r"\end{itemize}")
+                out.append(r"\end{enumerate}")
                 level -= 1
             out.append(r"\item " + render_marked(s, locals_))
         while level > 0:
-            out.append(r"\end{itemize}")
+            out.append(r"\end{enumerate}")
             level -= 1
-        out.append(r"\end{itemize}")
+        out.append(r"\end{enumerate}")
         out.append(r"\end{leanproof}")
     return "\n".join(out)
 
@@ -551,7 +608,7 @@ def _tactic_heads(d: Decl) -> list[str]:
 
 def _proof_mentions(d: Decl, project_names: dict[str, str]) -> list[str]:
     out = []
-    for t in d.proof:
+    for t in list(d.type) + [x for b in d.binders for x in b.type] + list(d.proof):
         if t.kind == "ident":
             full = project_names.get(t.text) or project_names.get(t.text.rsplit(".", 1)[-1])
             if full and full != d.full_name and full not in out:
@@ -560,7 +617,7 @@ def _proof_mentions(d: Decl, project_names: dict[str, str]) -> list[str]:
 
 
 def write_book(src_dir: str, output: str, title: str, first: list[str], headline: list[str],
-               max_files: int = 0) -> dict:
+               max_files: int = 0, tour: int = 0) -> dict:
     root = Path(src_dir)
     paths = sorted(p for p in root.rglob("*.lean") if ".lake" not in p.parts)
     files = {str(p.relative_to(root)): p.read_text(encoding="utf-8", errors="replace") for p in paths}
@@ -599,31 +656,89 @@ def write_book(src_dir: str, output: str, title: str, first: list[str], headline
             pass
     tactic_counts: Counter = Counter()
     proof_lengths: list[int] = []
+    # pass 1: who uses whom (names mentioned in statements and proofs)
     uses: dict[str, list[str]] = {}
-    body_parts: list[str] = []
-    current_area = None
-    n_decls = 0
-    for rel in order:
-        area = _area(rel)
-        if area != current_area:
-            body_parts.append(r"\chapter{%s}" % esc(area))
-            current_area = area
-        body_parts.append(r"\section*{%s}\addcontentsline{toc}{section}{%s}" % (esc(rel), esc(rel)))
-        for d in decls[rel]:
-            n_decls += 1
+    used_by: dict[str, list[str]] = defaultdict(list)
+    for ds in decls.values():
+        for d in ds:
             tactic_counts.update(_tactic_heads(d))
             if d.full_name:
                 uses[d.full_name] = _proof_mentions(d, names)
-            body_parts.append(decl_tex(d, tactic_counts, proof_lengths, means))
-
+                for u in uses[d.full_name]:
+                    used_by[u].append(d.full_name)
     roots = [names[h] for h in headline if h in names]
+    body_parts: list[str] = []
+    n_decls = 0
+    if tour and roots:
+        # guided tour: the main theorems, then what they use, then what that uses, ...
+        by_name = {d.full_name: d for ds in decls.values() for d in ds if d.full_name}
+        level = {r: 0 for r in roots}
+        q = deque(roots)
+        while q and len(level) < tour:
+            n = q.popleft()
+            for m in uses.get(n, []):
+                if m not in level and m in by_name:
+                    level[m] = level[n] + 1
+                    q.append(m)
+                    if len(level) >= tour:
+                        break
+        shown = set(level)
+        LINKS.clear()
+        LINKS.update({k: v for k, v in names.items() if v in shown})
+        titles = {0: "The main theorems", 1: "What the main theorems are proved from"}
+        for lv in range(max(level.values()) + 1):
+            members = [n for n in level if level[n] == lv]
+            if not members:
+                continue
+            body_parts.append(r"\chapter{%s}" % (titles.get(lv) or f"Level {lv}: what level {lv - 1} uses"))
+            for n in members:
+                d = by_name[n]
+                n_decls += 1
+                body_parts.append(decl_tex(d, Counter(), proof_lengths, means,
+                                           [u for u in uses.get(n, []) if u in shown],
+                                           [u for u in used_by.get(n, []) if u in shown]))
+        order_shown = sorted({by_name[n].file for n in shown})
+    else:
+        LINKS.clear()
+        LINKS.update(names)
+        current_area = None
+        for rel in order:
+            area = _area(rel)
+            if area != current_area:
+                body_parts.append(r"\chapter{%s}" % esc(area))
+                current_area = area
+            body_parts.append(r"\section*{%s}\addcontentsline{toc}{section}{%s}" % (esc(rel), esc(rel)))
+            for d in decls[rel]:
+                n_decls += 1
+                body_parts.append(decl_tex(d, Counter(), proof_lengths, means,
+                                           uses.get(d.full_name, []), used_by.get(d.full_name, [])))
+        order_shown = order
+
     lines_per_area = Counter()
     for rel in order:
         lines_per_area[_area(rel, 1) if "/" in rel else "(top level)"] += files[rel].count("\n")
     finer = Counter()
     for rel in order:
         finer[_area(rel)] += files[rel].count("\n")
-    overview = [
+    how_to_read = [
+        r"\chapter*{How to read this book}\addcontentsline{toc}{chapter}{How to read this book}",
+        r"Every result is shown the same way:",
+        r"\begin{itemize}",
+        r"\item a shaded box with its kind and Lean name, a plain-English reading of the name on the right, "
+        r"and the statement in English with the formulas typeset;",
+        r"\item \textbf{Uses} and \textbf{Used by}: the other results it depends on and the ones that depend on "
+        r"it. The \textcolor{linkblue}{blue names} are links: click to jump to that result;",
+        r"\item the proof as numbered steps, one per Lean tactic; sub-steps (a), (b), \dots\ prove a claim made "
+        r"in the step above, and each case of a case split is its own sub-list.",
+        r"\end{itemize}",
+        r"Step wording follows fixed rules: \emph{By linear arithmetic} means Lean's \leanc{linarith} closed the "
+        r"goal; \emph{Simplify using \dots} means simplification with the listed facts; \emph{Rewrite using "
+        r"\dots} means replacing equals by equals. Text in \leanc{this font} is Lean code that no rule covers yet. "
+        r"The steps say what was done, not why it works: that is in the Lean proof, which Lean has checked.",
+    ] + ([r"\par\medskip This volume is a \emph{guided tour}: the chapter \emph{The main theorems} comes first, then the "
+          r"results their proofs use, and each later chapter what the previous one uses, until the size limit of "
+          r"the volume. The full book has everything."] if tour and roots else [])
+    overview = how_to_read + [
         r"\chapter{Overview}",
         rf"This book was produced from the Lean source by fixed translation rules, with no AI: "
         rf"{len(order):,} files, {sum(files[r].count(chr(10)) for r in order):,} lines and {n_decls:,} "

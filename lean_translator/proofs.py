@@ -530,9 +530,12 @@ def narrate(d: Decl, g: Glosser | None = None, tex: bool = False) -> list[tuple[
     out: list[tuple[int, str]] = []
 
     def walk(steps: list[Step], depth: int) -> None:
+        n_bullets = sum(1 for s in steps if s.bullet)
+        k = 0
         for s in steps:
             if s.bullet:
-                out.append((depth, "Case:" if s.children else ""))
+                k += 1
+                out.append((depth, (f"Case {k}:" if n_bullets > 1 else "Then:") if s.children else ""))
                 walk(s.children, depth + 1)
                 continue
             text = _sentence(s.toks, m)

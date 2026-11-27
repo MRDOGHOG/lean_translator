@@ -212,7 +212,7 @@ def run_latex(args: argparse.Namespace) -> None:
     from .latex import write_book
 
     t0 = time.perf_counter()
-    st = write_book(args.path, args.output, args.title, args.first, args.headline, args.max_files)
+    st = write_book(args.path, args.output, args.title, args.first, args.headline, args.max_files, args.tour)
     print(f"latex: {st['files']:,} files, {st['declarations']:,} declarations, {st['proofs']:,} proofs "
           f"({st['steps']:,} steps) -> {args.output} in {time.perf_counter() - t0:.1f}s; "
           f"headline theorems found: {', '.join(st['headline_found']) or 'none'}", file=sys.stderr)
@@ -267,6 +267,8 @@ def main(argv: list[str] | None = None) -> None:
     lx.add_argument("--first", nargs="*", default=[], help="files to start from (reading order follows imports)")
     lx.add_argument("--headline", nargs="*", default=[], help="main theorems, for the proof map figure")
     lx.add_argument("--max-files", type=int, default=0)
+    lx.add_argument("--tour", type=int, default=0,
+                    help="guided tour of at most N results: the headline theorems, then what they use, ...")
     lx.set_defaults(func=run_latex)
 
     p = sub.add_parser("pairs", help="build stage-2 training pairs (gloss -> docstring)")

@@ -16,7 +16,7 @@ on:
     paths: ["lean_translator/latex.py", "lean_translator/proofs.py", ".github/workflows/lean-to-latex.yml"]
 
 permissions:
-  contents: read
+  contents: write  # the finished PDFs are committed to books/ on this branch
 
 jobs:
   latex:
@@ -54,8 +54,8 @@ jobs:
         run: |
           mkdir -p ../../out
           src=$( [ -d src ] && echo src || echo . )
-          python -m lean_translator latex "$src" -o ../../out/rh-main.tex --max-files 60 \
-            --title "The Riemann Hypothesis proof in English: the main line" \
+          python -m lean_translator latex "$src" -o ../../out/rh-tour.tex --tour 400 \
+            --title "The Riemann Hypothesis proof in English: a guided tour" \
             --first Main.lean New/Main.lean --headline $HEADLINE 2>&1 | tee ../../out/stats.txt
           python -m lean_translator latex "$src" -o ../../out/rh-full.tex \
             --title "The Riemann Hypothesis (and GRH) proof in English" \
@@ -65,7 +65,7 @@ jobs:
       - name: Typeset
         working-directory: out
         run: |
-          for b in rh-main rh-full; do
+          for b in rh-tour rh-full; do
             start=$(date +%s)
             for pass in 1 2; do
               timeout 40m lualatex -interaction=nonstopmode -halt-on-error=false $b.tex > $b.run$pass.log 2>&1 || true
@@ -76,7 +76,21 @@ jobs:
             grep -m 10 -A 3 '^! ' $b.log || true
           done
           { echo '```'; cat stats.txt; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
-          pdftoppm -r 60 -png -f 1 -l 12 rh-main.pdf page || true
+          pdftoppm -r 60 -png -f 1 -l 12 rh-tour.pdf page || true
+
+      - name: Commit the PDFs to books/
+        working-directory: tool
+        run: |
+          mkdir -p books
+          cp ../out/rh-tour.pdf ../out/rh-full.pdf ../out/stats.txt books/ 2>/dev/null || true
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add books
+          git commit -m "books: typeset RH/GRH proof in English (tour + full)" || exit 0
+          for i in 1 2 3 4; do
+            git pull --rebase -q origin "${GITHUB_REF_NAME}" && git push -q origin "HEAD:${GITHUB_REF_NAME}" && break
+            sleep $((i * 5))
+          done
 
       - uses: actions/upload-artifact@v4
         with:
