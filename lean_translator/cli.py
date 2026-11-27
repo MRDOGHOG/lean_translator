@@ -182,6 +182,16 @@ def run_book(args: argparse.Namespace) -> None:
               + ", ".join(f"{k} {v}" for k, v in unknown.most_common(25)), file=sys.stderr)
 
 
+def run_latex(args: argparse.Namespace) -> None:
+    from .latex import write_book
+
+    t0 = time.perf_counter()
+    st = write_book(args.path, args.output, args.title, args.first, args.headline, args.max_files)
+    print(f"latex: {st['files']:,} files, {st['declarations']:,} declarations, {st['proofs']:,} proofs "
+          f"({st['steps']:,} steps) -> {args.output} in {time.perf_counter() - t0:.1f}s; "
+          f"headline theorems found: {', '.join(st['headline_found']) or 'none'}", file=sys.stderr)
+
+
 def run_pairs(args: argparse.Namespace) -> None:
     """Build (gloss -> docstring) training pairs for the neural refiner."""
     from .refiner.data import make_pairs
@@ -223,6 +233,15 @@ def main(argv: list[str] | None = None) -> None:
     b.add_argument("--title", default="The proof in English")
     b.add_argument("--first", nargs="*", default=[], help="files to put at the start")
     b.set_defaults(func=run_book)
+
+    lx = sub.add_parser("latex", help="whole project -> a LaTeX book with typeset math and figures")
+    lx.add_argument("path", help="source directory")
+    lx.add_argument("-o", "--output", required=True)
+    lx.add_argument("--title", default="The proof in English")
+    lx.add_argument("--first", nargs="*", default=[], help="files to start from (reading order follows imports)")
+    lx.add_argument("--headline", nargs="*", default=[], help="main theorems, for the proof map figure")
+    lx.add_argument("--max-files", type=int, default=0)
+    lx.set_defaults(func=run_latex)
 
     p = sub.add_parser("pairs", help="build stage-2 training pairs (gloss -> docstring)")
     p.add_argument("paths", nargs="+")

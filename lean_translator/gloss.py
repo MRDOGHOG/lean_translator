@@ -78,6 +78,7 @@ class Translation:
     doc: str | None
     masked: str = ""  # gloss with math terms replaced by [T0], [T1], ...
     slots: list[str] = field(default_factory=list)  # what each [Tk] stands for
+    slot_nodes: list = field(default_factory=list)  # parsed term of each slot (not serialised)
 
     def to_dict(self) -> dict:
         return {
@@ -97,6 +98,7 @@ class Glosser:
         # without ever being able to alter the math itself.
         self.masking = False
         self.slots: list[str] = []
+        self.slot_nodes: list = []  # the parsed term behind each slot (for LaTeX output)
         self._depth = 0
 
     # ------------------------------------------------------------------ names
@@ -141,6 +143,7 @@ class Glosser:
         out = f"({s})" if p < prec else s
         if self.masking and self._depth == 0 and not _ATOM_RE.match(out):
             self.slots.append(out)
+            self.slot_nodes.append(n)
             return slot_marker(len(self.slots) - 1)
         return out
 
@@ -798,15 +801,16 @@ def gloss_decl(d: Decl) -> Translation:
     head = f"{_KIND_WORD.get(kind, kind)} {shown}: "
     masked = head + " ".join(x for x in sentences if x)
     del n_plain
-    masked, slots = _renumber(masked, g.slots)
+    order: list[int] = []
+    masked, slots = _renumber(masked, g.slots, order)
     return Translation(
         name=shown, kind=kind, file=d.file, line=d.line, lean=d.signature,
         gloss=unmask(masked, slots), name_gloss=gloss_name(shown), doc=d.doc,
-        masked=masked, slots=slots,
+        masked=masked, slots=slots, slot_nodes=[g.slot_nodes[k] for k in order],
     )
 
 
-def _renumber(masked: str, slots: list[str]) -> tuple[str, list[str]]:
+def _renumber(masked: str, slots: list[str], order: list[int] | None = None) -> tuple[str, list[str]]:
     """Some code paths render a term and then discard the text, leaving
     orphan slots.  Renumber by order of appearance and drop the unused ones,
     so slots are always [T0], [T1], ... each appearing exactly once."""
@@ -814,6 +818,8 @@ def _renumber(masked: str, slots: list[str]) -> tuple[str, list[str]]:
 
     def sub(m: re.Match) -> str:
         new.append(slots[int(m.group(1))])
+        if order is not None:
+            order.append(int(m.group(1)))
         return slot_marker(len(new) - 1)
 
     return _SLOT_RE.sub(sub, masked), new

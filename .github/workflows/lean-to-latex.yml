@@ -1,0 +1,89 @@
+# Typeset a whole Lean project as a LaTeX book, by rules (no AI): statements
+# in English with real math, proofs narrated step by step, and figures (import
+# map, sizes, tactics, proof lengths, proof map of the main theorems).
+# Runs on GitHub's machines; the PDFs are the artifact.
+name: Lean to LaTeX book
+
+on:
+  workflow_dispatch:
+    inputs:
+      repo:
+        default: lsernau/grh-lean
+      subdir:
+        default: grh-compact
+  push:
+    branches: [claude/optimistic-tesla-pw5s77]
+    paths: ["lean_translator/latex.py", "lean_translator/proofs.py", ".github/workflows/lean-to-latex.yml"]
+
+permissions:
+  contents: read
+
+jobs:
+  latex:
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    env:
+      REPO: ${{ inputs.repo || 'lsernau/grh-lean' }}
+      SUBDIR: ${{ inputs.subdir || 'grh-compact' }}
+      HEADLINE: riemannHypothesis riemannZeta_eq_zero_re LFunction_ne_zero_of_half_lt_re LFunction_eq_zero_re LFunction_eq_zero_re_of_isPrimitive
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          path: tool
+      - uses: actions/checkout@v4
+        with:
+          repository: ${{ env.REPO }}
+          path: target
+          fetch-depth: 1
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install LuaLaTeX
+        run: |
+          sudo apt-get update -qq
+          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -qq --no-install-recommends \
+            texlive-luatex texlive-latex-recommended texlive-latex-extra texlive-pictures \
+            texlive-fonts-recommended fonts-dejavu-core lmodern poppler-utils > /dev/null
+
+      - name: Write the LaTeX (main volume and full book)
+        working-directory: target/${{ env.SUBDIR }}
+        env:
+          PYTHONPATH: ${{ github.workspace }}/tool
+        run: |
+          mkdir -p ../../out
+          src=$( [ -d src ] && echo src || echo . )
+          python -m lean_translator latex "$src" -o ../../out/rh-main.tex --max-files 60 \
+            --title "The Riemann Hypothesis proof in English: the main line" \
+            --first Main.lean New/Main.lean --headline $HEADLINE 2>&1 | tee ../../out/stats.txt
+          python -m lean_translator latex "$src" -o ../../out/rh-full.tex \
+            --title "The Riemann Hypothesis (and GRH) proof in English" \
+            --first Main.lean New/Main.lean --headline $HEADLINE 2>&1 | tee -a ../../out/stats.txt
+          ls -la ../../out
+
+      - name: Typeset
+        working-directory: out
+        run: |
+          for b in rh-main rh-full; do
+            start=$(date +%s)
+            for pass in 1 2; do
+              timeout 40m lualatex -interaction=nonstopmode -halt-on-error=false $b.tex > $b.run$pass.log 2>&1 || true
+            done
+            pages=$(pdfinfo $b.pdf 2>/dev/null | awk '/^Pages/{print $2}')
+            errs=$(grep -c '^! ' $b.log || true)
+            echo "$b.pdf: ${pages:-no PDF} pages, $errs LaTeX errors, $(( $(date +%s) - start ))s" | tee -a stats.txt
+            grep -m 10 -A 3 '^! ' $b.log || true
+          done
+          { echo '```'; cat stats.txt; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
+          pdftoppm -r 60 -png -f 1 -l 12 rh-main.pdf page || true
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: latex-book
+          path: |
+            out/*.pdf
+            out/*.tex
+            out/stats.txt
+            out/page-*.png
+          retention-days: 30

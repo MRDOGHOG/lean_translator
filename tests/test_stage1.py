@@ -163,3 +163,17 @@ def test_proof_narration_keeps_structure():
     assert steps[0] == (0, "Consider separately whether 0 is at most x or not.")
     assert (1, "Simplify using `abs_nonneg`.") in steps
     assert (1, "By linear arithmetic.") in steps
+
+
+def test_latex_formulas():
+    from lean_translator.latex import tex_math
+    from lean_translator.lexer import tokenize
+    from lean_translator.parser import parse
+
+    def t(s):
+        return tex_math(parse(tokenize(s)))
+
+    assert t("a / b") == r"\frac{a}{b}"
+    assert t("x ^ 2 ≤ ‖y‖") == r"{x}^{2} \le \left\lVert y \right\rVert"
+    assert r"\sum_{i \in s}" in t("∑ i ∈ s, f i")
+    assert t("Real.sqrt x") == r"\sqrt{x}"

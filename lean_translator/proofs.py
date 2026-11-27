@@ -141,8 +141,9 @@ def _tree(units: list[Step]) -> list[Step]:
 
 # ---------------------------------------------------------------- language
 class _Math:
-    def __init__(self, g: Glosser) -> None:
+    def __init__(self, g: Glosser, tex: bool = False) -> None:
         self.g = g
+        self.tex = tex  # formulas become \x01<latex>\x02 instead of plain text
 
     def raw(self, toks: list[Token]) -> str:
         s = _detok(toks).strip()
@@ -156,6 +157,8 @@ class _Math:
             return ""
         try:
             n = parse(toks)
+            if self.tex:
+                return self._prop_tex(n) or self.code(toks)
             s = self.g.prop(n) if self.g.is_prop(n) else self.g.term(n)
         except Exception:
             return self.code(toks)
@@ -163,8 +166,34 @@ class _Math:
             return self.code(toks)
         return s
 
+    def _prop_tex(self, n) -> str:
+        from .gloss import _SLOT_RE
+        from .latex import tex_math
+
+        g = self.g
+        g.masking, g.slots, g.slot_nodes = True, [], []
+        try:
+            s = g.prop(n) if g.is_prop(n) else g.term(n)
+        finally:
+            g.masking = False
+        nodes = list(g.slot_nodes)
+        return _SLOT_RE.sub(lambda mm: "\x01" + tex_math(nodes[int(mm.group(1))]) + "\x02", s)
+
+    def formula(self, toks: list[Token]) -> str:
+        """Pure math (calc steps): typeset in LaTeX mode, code otherwise."""
+        if not self.tex or not toks:
+            return self.code(toks)
+        from .latex import tex_math
+        try:
+            s = tex_math(parse(toks), set(self.g.locals))
+            if toks[0].text == "_" and s.startswith("\\cdot "):  # calc continuation `_ ≤ b`
+                s = "\\qquad " + s[len("\\cdot "):]
+            return "\x01" + s + "\x02"
+        except Exception:
+            return self.code(toks)
+
     def names(self, toks: list[Token]) -> list[str]:
-        return [t.text for t in toks if t.kind == "ident" and t.text not in ("with", "at", "using", "only")]
+        return [t.text for t in toks if t.kind == "ident" and t.text not in ("with", "at", "using", "only", "_")]
 
 
 def _split_at(toks: list[Token], word: str) -> tuple[list[Token], list[Token] | None]:
@@ -368,7 +397,7 @@ def _sentence(toks: list[Token], m: _Math) -> str:
         if not rel:
             return "We compute:"
         how = (_how(proof[1:], m) if proof and proof[0].text == "by" else "by " + code(proof or [])) if proof else ""
-        return f"We compute: {code(rel)}" + (f" ({how})" if how else "")
+        return f"We compute: {m.formula(rel)}" + (f" ({how})" if how else "")
     if head == "|":  # an alternative of induction / cases / match
         pat, tac = _split_at(rest, "=>")
         names = m.names(pat)
@@ -379,7 +408,7 @@ def _sentence(toks: list[Token], m: _Math) -> str:
         return f"{label}:"
     if head == "_" and m:
         rel, proof = _split_at(rest, ":=")
-        return f"{code(toks[:1] + rel)}" + (f" ({_how(proof[1:], m) if proof and proof[0].text == 'by' else 'by ' + code(proof or [])})" if proof else "")
+        return f"{m.formula(toks[:1] + rel)}" + (f" ({_how(proof[1:], m) if proof and proof[0].text == 'by' else 'by ' + code(proof or [])})" if proof else "")
     if head in ("symm", "symmetry"):
         return "By symmetry, swap the two sides."
     if head in ("trans", "transitivity"):
@@ -426,14 +455,15 @@ def _lower(s: str) -> str:
 
 
 # ---------------------------------------------------------------- public
-def narrate(d: Decl, g: Glosser | None = None) -> list[tuple[int, str]]:
-    """English steps of a theorem's proof as (depth, sentence)."""
+def narrate(d: Decl, g: Glosser | None = None, tex: bool = False) -> list[tuple[int, str]]:
+    """English steps of a theorem's proof as (depth, sentence).  With `tex`, formulas are
+    marked as \x01<LaTeX>\x02 for the LaTeX writer."""
     toks = d.proof
     if not toks:
         return []
     g = g or Glosser()
     g.locals.update(x for b in d.binders + d.context for x in b.names)
-    m = _Math(g)
+    m = _Math(g, tex)
     head = toks[0].text
     if head == "|":
         return [(0, "By cases on the shape of the input (one equation per case).")]
