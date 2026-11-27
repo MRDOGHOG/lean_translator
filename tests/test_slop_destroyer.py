@@ -70,3 +70,30 @@ def test_graph_then_probe_end_to_end(tmp_path):
     main = (proj / "Slop" / "Main.lean").read_text()
     assert "helper" not in main and "unused" not in main and "simp [Nat.add_comm]" in main
     assert subprocess.run(["lake", "build"], cwd=proj, capture_output=True).returncode == 0
+
+
+def test_lintfix_edits():
+    from pathlib import Path as P
+
+    from slop_destroyer.lintfix import Warning_, _remove_simp_arg, plan_edits
+
+    assert _remove_simp_arg("  simp [a, foo (b c), d]", 11) == "  simp [a, d]"
+    assert _remove_simp_arg("  simp [a, d]", 11) == "  simp [a]"
+    assert _remove_simp_arg("  simp only [a] at h", 13) == "  simp only at h"
+    src = (
+        "theorem t : True := by\n"
+        "  have unused : 1 = 1 := by\n"
+        "    rfl\n"
+        "  have used : True := trivial\n"
+        "  skip\n"
+        "  exact used\n"
+    )
+    f = P("x.lean")
+    warns = [
+        Warning_(f, 2, 7, "unused_var", "Variable name `unused` is not explicitly referenced."),
+        Warning_(f, 1, 10, "unused_var", "binder in the statement: must not be touched"),
+        Warning_(f, 5, 2, "unused_tactic", "'skip' tactic does nothing"),
+    ]
+    new, done = plan_edits(src, warns)
+    assert new == "theorem t : True := by\n  have used : True := trivial\n  exact used\n"
+    assert done == {"unused_have": 1, "unused_tactic": 1}

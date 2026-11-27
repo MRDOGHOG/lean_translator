@@ -98,6 +98,18 @@ def main(argv: list[str] | None = None) -> None:
     s.add_argument("-j", "--jobs", type=int, default=0)
     s.set_defaults(func=cmd_static)
 
+    lf = sub.add_parser("lintfix", help="remove unused simp args / haves / dead tactics reported by Lean's linters")
+    lf.add_argument("--root", required=True)
+    lf.add_argument("--include", action="append", help="only files under these relative paths")
+    lf.add_argument("--lean", default="lake env lean")
+    lf.add_argument("--build", default="lake build")
+    lf.add_argument("-j", "--jobs", type=int, default=4)
+    lf.add_argument("--passes", type=int, default=2)
+    lf.add_argument("--rounds", type=int, default=4)
+    lf.add_argument("--write", action="store_true")
+    lf.add_argument("--verify", action="store_true")
+    lf.set_defaults(func=lambda a: __import__("slop_destroyer.lintfix", fromlist=["run"]).run(a))
+
     args = ap.parse_args(argv)
     args.func(args)
 

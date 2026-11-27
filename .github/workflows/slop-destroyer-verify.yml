@@ -114,6 +114,33 @@ jobs:
           python -m slop_destroyer graph --root . --module "${{ steps.keep.outputs.module }}" "${args[@]}" \
             --show --write --verify --rounds 4 2>&1 | tee graph.log | grep -v "^trace:" | tail -200
           echo "graph mode: $(( $(date +%s) - start ))s" | tee -a "$GITHUB_STEP_SUMMARY"
+          lines=$(find . -name '*.lean' -not -path './.lake/*' -print0 | xargs -0 cat | wc -l)
+          echo "lines after graph mode: $lines" | tee -a "$GITHUB_STEP_SUMMARY"
+
+      - name: Lint-fix (unused simp arguments, unused haves, dead tactics)
+        working-directory: target/${{ env.SUBDIR }}
+        env:
+          PYTHONPATH: ${{ github.workspace }}/tool
+        run: |
+          start=$(date +%s)
+          python -m slop_destroyer lintfix --root . --write --verify --passes 2 -j 4 2>&1 | tee lintfix.log | tail -40
+          echo "lint-fix: $(( $(date +%s) - start ))s; $(grep 'total fixes' lintfix.log)" | tee -a "$GITHUB_STEP_SUMMARY"
+          lines=$(find . -name '*.lean' -not -path './.lake/*' -print0 | xargs -0 cat | wc -l)
+          echo "lines after lint-fix: $lines" | tee -a "$GITHUB_STEP_SUMMARY"
+
+      - name: Graph mode again (lint-fix can make more declarations unused)
+        working-directory: target/${{ env.SUBDIR }}
+        env:
+          PYTHONPATH: ${{ github.workspace }}/tool
+        run: |
+          args=()
+          IFS=',' read -ra names <<< "${{ steps.keep.outputs.keep }}"
+          for n in "${names[@]}"; do args+=(--keep "$(echo "$n" | xargs)"); done
+          for p in ${{ steps.keep.outputs.prefixes }}; do args+=(--prefix "$p"); done
+          python -m slop_destroyer graph --root . --module "${{ steps.keep.outputs.module }}" "${args[@]}" \
+            --write --verify --rounds 4 2>&1 | tee graph2.log | grep -v "^trace:" | tail -60
+          lines=$(find . -name '*.lean' -not -path './.lake/*' -print0 | xargs -0 cat | wc -l)
+          echo "lines after second graph pass: $lines" | tee -a "$GITHUB_STEP_SUMMARY"
 
       - name: Check the headline theorems
         if: always()
@@ -137,7 +164,7 @@ jobs:
           after=$(find . -name '*.lean' -not -path './.lake/*' -print0 | xargs -0 cat | wc -l)
           git diff --shortstat | tee ../../report/diffstat.txt
           git diff | gzip -9 > ../../report/trim.patch.gz
-          cp graph.log axioms.txt where.txt ../../report/ 2>/dev/null || true
+          cp graph.log graph2.log lintfix.log axioms.txt where.txt ../../report/ 2>/dev/null || true
           {
             echo "## $REPO / $SUBDIR"
             echo
