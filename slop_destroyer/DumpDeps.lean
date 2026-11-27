@@ -27,11 +27,21 @@ def splitArgs (args : List String) : List String × List String :=
     | a :: rest => go (a :: acc) rest
   go [] args
 
+/-- Fingerprint of a theorem's statement: structural hash with universe
+parameters renamed to u0, u1, ... (bound variables are already nameless de
+Bruijn indices), so two theorems stating the same thing get the same hash. -/
+def fingerprint (ci : ConstantInfo) : UInt64 :=
+  let us := ci.levelParams.mapIdx fun i _ => Level.param (Name.mkSimple s!"u{i}")
+  (ci.type.instantiateLevelParams ci.levelParams us).hash
+
 def isMetaType (e : Expr) : Bool :=
   e.getUsedConstants.any fun c => (`Lean).isPrefixOf c || (`IO).isPrefixOf c
 
 unsafe def main (args : List String) : IO UInt32 := do
-  let out :: rest := args | do IO.eprintln "usage: DumpDeps OUT PREFIX... -- MODULE..."; return 1
+  let out :: rest := args | do IO.eprintln "usage: DumpDeps OUT [--fp FP.tsv] PREFIX... -- MODULE..."; return 1
+  let (fpOut, rest) := match rest with
+    | "--fp" :: f :: r => (some f, r)
+    | r => (none, r)
   let (prefixes, mods) := splitArgs rest
   if mods.isEmpty then
     IO.eprintln "no modules given"; return 1
@@ -54,4 +64,16 @@ unsafe def main (args : List String) : IO UInt32 := do
     h.putStrLn s!"{name}\t{mod}\t{s}\t{e}\t{isMetaType ci.type}\t{" ".intercalate deps.toList}\t{" ".intercalate tdeps.toList}"
     n := n + 1
   IO.eprintln s!"dumped {n} constants"
+  -- Statement fingerprints of *every* theorem in scope (dependencies included),
+  -- so re-proofs of library lemmas can be found too.
+  if let some fp := fpOut then
+    let hf ← IO.FS.Handle.mk fp .write
+    let mut m := 0
+    for (name, ci) in env.constants.map₁.toList do
+      if name.isInternal then continue
+      let .thmInfo _ := ci | continue
+      let some idx := env.getModuleIdxFor? name | continue
+      hf.putStrLn s!"{fingerprint ci}\t{name}\t{modNames[idx.toNat]!}"
+      m := m + 1
+    IO.eprintln s!"fingerprinted {m} theorems"
   return 0

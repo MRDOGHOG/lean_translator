@@ -77,6 +77,52 @@ A deletion is kept only if all three checks pass:
   `pp.all` so hidden instances count;
 - no theorem picked up a `sorry` (checked with `#print axioms`).
 
+## lintfix: slop inside proofs, from Lean's own linters
+
+```bash
+python -m slop_destroyer lintfix --root ~/myproj --write --verify
+```
+
+One compile per file, with Lean's "unused" linters switched on, reports at
+exact positions:
+- **unused `simp` arguments**, which get removed;
+- **unused `have`s**, whose block gets deleted;
+- **tactics that do nothing** (a Mathlib linter), whose line gets deleted.
+
+All the fixes are applied, then the project is rebuilt, and any file that
+no longer compiles gets its original back. Run graph mode again afterwards:
+removing `simp [..., helper]` can make `helper` itself unused.
+
+## redundant: theorems proved twice
+
+```bash
+python -m slop_destroyer redundant --root ~/myproj --module MyProj --keep MyProj.main --write --verify
+```
+
+`DumpDeps.lean --fp` fingerprints every theorem's statement, including every
+Mathlib and core theorem in scope. The fingerprint is a structural hash with
+universes renamed (variable names already don't matter, because Lean stores
+bound variables as positions). Theorems with equal fingerprints state the
+same thing, so one proof is enough. Each duplicate becomes `alias X := Y` on
+projects with Batteries or Mathlib, or `theorem X … := @Y args` on plain
+Lean. Its name stays, its proof goes, and a rebuild restores anything that
+breaks. It finds both duplicates inside the project and project lemmas that
+re-prove something already in Mathlib.
+
+## speed: what's slow, and the standard fix
+
+```bash
+python -m slop_destroyer speed --root ~/myproj --top 50                          # report only
+python -m slop_destroyer speed --root ~/myproj --top 50 --simp-only --write --verify
+```
+
+Compiles every file with Lean's profiler on, then reports time per
+declaration and per tactic, slowest first. With `--simp-only`, each bare
+`simp` / `simp_all` / `simpa` / `dsimp` in the slowest declarations is
+replaced by the exact `simp only [...]` call that Lean's `simp?` suggests.
+That's the same proof with far less searching, and it can't break when the
+simp library changes. The changed files are rebuilt and re-profiled.
+
 ## Not handled
 
 - **Shrinking imports.** For that, use Mathlib's `shake`, which removes

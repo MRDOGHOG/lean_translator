@@ -1,0 +1,166 @@
+# Redundancies and speed, verified. Builds a Lean project on GitHub's machines,
+# then:
+#  1. redundant: theorems proved twice (inside the project, or already in
+#     Mathlib/core) become aliases of a single proof;
+#  2. speed: profile every declaration; in the slowest, bare `simp` calls become
+#     the `simp only [...]` Lean suggests;
+# each followed by a rebuild that restores any file that breaks, and finally
+# `#print axioms` on the headline theorems.
+name: SLOP_DESTROYER redundancies and speed
+
+on:
+  workflow_dispatch:
+    inputs:
+      repo:
+        default: lsernau/grh-lean
+      subdir:
+        default: grh-compact
+  push:
+    branches: [claude/optimistic-tesla-pw5s77]
+    paths: [".github/workflows/slop-destroyer-improve.yml"]
+
+permissions:
+  contents: read
+
+defaults:
+  run:
+    shell: bash  # = bash -eo pipefail: a failing command in a pipeline fails the step
+
+jobs:
+  trim:
+    runs-on: ubuntu-latest
+    timeout-minutes: 355
+    env:
+      REPO: ${{ inputs.repo || 'lsernau/grh-lean' }}
+      SUBDIR: ${{ inputs.subdir || 'grh-compact' }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          path: tool
+
+      - uses: actions/checkout@v4
+        with:
+          repository: ${{ env.REPO }}
+          path: target
+          fetch-depth: 1
+          persist-credentials: false
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install Lean (elan)
+        run: |
+          curl -sSfL https://raw.githubusercontent.com/leanprover/elan/master/elan-init.sh | sh -s -- -y --default-toolchain none
+          echo "$HOME/.elan/bin" >> "$GITHUB_PATH"
+
+      - name: Project info
+        working-directory: target/${{ env.SUBDIR }}
+        run: |
+          echo "commit: $(git rev-parse HEAD)"
+          cat lean-toolchain
+          ls
+          (cat lakefile.toml 2>/dev/null || cat lakefile.lean) | head -40
+          find . -name '*.lean' -not -path './.lake/*' -print0 | xargs -0 cat | wc -l | xargs echo "lines before:"
+          df -h . | tail -1; nproc; free -g | head -2
+
+      - name: Fetch Mathlib's prebuilt files
+        working-directory: target/${{ env.SUBDIR }}
+        run: |
+          lake --version
+          if grep -qi mathlib lake-manifest.json 2>/dev/null; then lake exe cache get; fi
+
+      - name: Baseline build
+        working-directory: target/${{ env.SUBDIR }}
+        run: |
+          start=$(date +%s)
+          lake build 2>&1 | tail -20
+          echo "baseline build: $(( $(date +%s) - start ))s" | tee -a "$GITHUB_STEP_SUMMARY"
+
+      - name: Headline theorems and their module
+        id: keep
+        working-directory: target/${{ env.SUBDIR }}
+        env:
+          PYTHONPATH: ${{ github.workspace }}/tool
+        run: |
+          python -m slop_destroyer.find_theorems . RiemannHypothesis --where | tee where.txt
+          keep=$(python -m slop_destroyer.find_theorems . RiemannHypothesis --headline | paste -sd, -)
+          echo "keep=$keep" >> "$GITHUB_OUTPUT"
+          # module of the file holding the real proof = path relative to a srcDir, if its .olean exists
+          file=$(grep -oE 'at  [^:]+' where.txt | cut -c5- | while read f; do grep -q sorry "$f" || echo "$f"; done | head -1)
+          python - "$file" >> "$GITHUB_OUTPUT" <<'EOF'
+          import sys
+          from pathlib import Path
+          f = Path(sys.argv[1]).with_suffix("")
+          parts = f.parts
+          for k in range(len(parts)):
+              mod = ".".join(parts[k:])
+              if Path(".lake/build/lib/lean", *parts[k:]).with_suffix(".olean").exists():
+                  print(f"module={mod}")
+                  break
+          roots = sorted({p.stem if p.is_file() else p.name for p in Path(".lake/build/lib/lean").iterdir()
+                          if p.suffix in ("", ".olean")})
+          print("prefixes=" + " ".join(roots))
+          EOF
+          cat "$GITHUB_OUTPUT"
+
+      - name: Redundancies (theorems proved twice)
+        working-directory: target/${{ env.SUBDIR }}
+        env:
+          PYTHONPATH: ${{ github.workspace }}/tool
+        run: |
+          args=()
+          IFS=',' read -ra names <<< "${{ steps.keep.outputs.keep }}"
+          for n in "${names[@]}"; do args+=(--keep "$(echo "$n" | xargs)"); done
+          for p in ${{ steps.keep.outputs.prefixes }}; do args+=(--prefix "$p"); done
+          start=$(date +%s)
+          python -m slop_destroyer redundant --root . --module "${{ steps.keep.outputs.module }}" "${args[@]}" \
+            --show 200 --write --verify 2>&1 | tee redundant.log | grep -v "^trace:" | tail -230
+          {
+            echo "## Redundancies ($(( $(date +%s) - start ))s)"; echo '```'
+            grep -E "fingerprinted|duplicate statements|aliasable|\[verify\]" redundant.log; echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Speed (profile; slow bare simp -> simp only)
+        working-directory: target/${{ env.SUBDIR }}
+        env:
+          PYTHONPATH: ${{ github.workspace }}/tool
+        run: |
+          start=$(date +%s)
+          python -m slop_destroyer speed --root . --top 60 --threshold 50 --simp-only --write --verify -j 4 \
+            2>&1 | tee speed.log | grep -v "^trace:" | tail -120
+          {
+            echo "## Speed ($(( $(date +%s) - start ))s)"; echo '```'
+            grep -vE "^trace:|^\s*$" speed.log | head -90; echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Check the headline theorems
+        if: always()
+        working-directory: target/${{ env.SUBDIR }}
+        run: |
+          {
+            echo "import ${{ steps.keep.outputs.module }}"
+            IFS=',' read -ra names <<< "${{ steps.keep.outputs.keep }}"
+            for n in "${names[@]}"; do echo "#print axioms $(echo "$n" | xargs)"; done
+          } > SlopAxiomsCheck.lean
+          lake env lean SlopAxiomsCheck.lean 2>&1 | tee axioms.txt
+          rm SlopAxiomsCheck.lean
+          { echo '## Headline theorems'; echo '```'; cat axioms.txt; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
+          if grep -q sorryAx axioms.txt; then echo "::error::a headline theorem depends on sorry"; exit 1; fi
+
+      - name: Collect results
+        if: always()
+        working-directory: target/${{ env.SUBDIR }}
+        run: |
+          mkdir -p ../../report
+          git diff --shortstat | tee ../../report/diffstat.txt
+          git diff | gzip -9 > ../../report/improve.patch.gz
+          cp redundant.log speed.log axioms.txt where.txt ../../report/ 2>/dev/null || true
+          echo "patch: $(cat ../../report/diffstat.txt)" >> "$GITHUB_STEP_SUMMARY"
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: redundancies-and-speed
+          path: report/
+          retention-days: 30
