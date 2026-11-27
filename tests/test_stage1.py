@@ -145,3 +145,21 @@ def test_slot_check_rejects_dropped_or_duplicated_slots():
     assert not slot_check("[T0] only", 2)  # dropped
     assert not slot_check("[T0] [T0] [T1]", 2)  # duplicated
     assert not slot_check("[T0] [T1] [T2]", 2)  # invented
+
+
+def test_proof_narration_keeps_structure():
+    from lean_translator.decls import extract_decls
+    from lean_translator.proofs import narrate
+
+    src = """theorem t (x : ℝ) : |x| ≥ 0 ∨ x < 0 := by
+  by_cases hx : 0 ≤ x
+  · left
+    simp [abs_nonneg]
+  · right
+    linarith
+"""
+    (d,) = extract_decls(src)
+    steps = narrate(d)
+    assert steps[0] == (0, "Consider separately whether 0 is at most x or not.")
+    assert (1, "Simplify using `abs_nonneg`.") in steps
+    assert (1, "By linear arithmetic.") in steps

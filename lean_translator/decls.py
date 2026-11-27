@@ -62,6 +62,7 @@ class Decl:
     body: list[Token] = field(default_factory=list)  # short `:= term` bodies of defs
     fields: list[tuple[str, list[Token]]] = field(default_factory=list)  # structure fields
     extends: list[Token] = field(default_factory=list)
+    proof: list[Token] = field(default_factory=list)  # tokens after the statement (theorems only)
 
     @property
     def full_name(self) -> str:
@@ -154,7 +155,9 @@ def _statement_end(toks: list[Token], i: int, kind: str) -> int:
                 return i
             if t == ":":
                 seen_colon = True
-            if t == "|" and (seen_colon or kind in ("inductive",)):
+            # `| pat => ...` starts a line; `|x|` (absolute value) sits inside one
+            starts_line = i == 0 or toks[i - 1].line < tok.line
+            if t == "|" and (kind in ("inductive",) or seen_colon and starts_line):
                 return i
             if t in ("extends", "deriving", "with") and kind in ("structure", "class", "inductive"):
                 return i
@@ -268,6 +271,8 @@ def extract_decls(src: str, file: str = "<input>") -> list[Decl]:
             decl = Decl(kind, name, binders, typ, pending_doc, file, toks[j].line, namespace(), ctx, sig.strip())
             nxt = skip_to_next_command(end - 1 if end > k else k)
             _attach_tail(decl, toks[end:nxt])
+            if kind in ("theorem", "lemma", "example"):
+                decl.proof = toks[end:nxt]
             out.append(decl)
             pending_doc = None
             i = nxt

@@ -1,0 +1,64 @@
+# Translate a whole Lean project into an English "book" with the rule-based
+# translator (no AI, no Lean needed): every statement in English, every proof
+# narrated step by step. Runs on GitHub's machines; the book is the artifact.
+name: Lean to English book
+
+on:
+  workflow_dispatch:
+    inputs:
+      repo:
+        default: lsernau/grh-lean
+      subdir:
+        default: grh-compact
+  push:
+    branches: [claude/optimistic-tesla-pw5s77]
+    paths: ["lean_translator/**", ".github/workflows/lean-to-english-book.yml"]
+
+permissions:
+  contents: read
+
+jobs:
+  book:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      REPO: ${{ inputs.repo || 'lsernau/grh-lean' }}
+      SUBDIR: ${{ inputs.subdir || 'grh-compact' }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          path: tool
+      - uses: actions/checkout@v4
+        with:
+          repository: ${{ env.REPO }}
+          path: target
+          fetch-depth: 1
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Translate the whole project
+        working-directory: target/${{ env.SUBDIR }}
+        env:
+          PYTHONPATH: ${{ github.workspace }}/tool
+        run: |
+          src=$( [ -d src ] && echo src || echo . )
+          python -m lean_translator book "$src" -o ../../book.md \
+            --title "The Riemann Hypothesis (and GRH) proof, in English" \
+            --first Main.lean New/Main.lean 2>&1 | tee ../../book-stats.txt
+          wc -lc ../../book.md | tee -a ../../book-stats.txt
+          { echo '```'; cat ../../book-stats.txt; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: The top of the proof (the main theorems), as translated
+        run: |
+          # the first two files: the headline theorems and the endgame they come from
+          awk '/^## /{n++} n>=1 && n<=2' book.md | head -400
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: english-book
+          path: |
+            book.md
+            book-stats.txt
+          retention-days: 30
