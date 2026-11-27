@@ -121,14 +121,36 @@ def simp_only(path: Path, root: Path, lean_cmd: list[str], ranges: list[tuple[in
     done = 0
     for ln, s, e, call_end in sorted(calls, reverse=True):
         hit = suggestions.get((ln, s))
-        if not hit or not hit[2].startswith(("simp", "dsimp")) or "✝" in hit[2]:
-            continue  # `✝` names are inaccessible: they can't be written back into source
-        end_line, end_col, sug = hit
-        if end_line == ln:
-            end_col -= 1  # the probe had one extra `?` on this line
+        if not hit or not hit[2].startswith(("simp", "dsimp")) or "✝" in hit[2] or "↓" in hit[2]:
+            continue  # `✝` names are inaccessible and `↓` doesn't parse back: can't write them into source
+        sug = hit[2]
+        # Lean's range for the suggestion covers only the `simp?` keyword, so find the end of the
+        # whole call (its arguments may continue on later lines) ourselves.
+        end_line, end_col = call_extent(lines, ln, s)
         if apply_suggestion(new_lines, ln, s, end_line, end_col, sug):
             done += 1
     return ("\n".join(new_lines), done) if done else None
+
+
+def call_extent(lines: list[str], ln: int, col: int) -> tuple[int, int]:
+    """End (line, column) of the tactic call starting at (ln, col): the rest of its line, plus
+    following lines while brackets are open; a trailing `-- comment` is not part of the call."""
+    depth = 0
+    cur = ln
+    text = lines[ln - 1][col:]
+    start = col
+    while True:
+        code = text.split("--", 1)[0]
+        for ch in code:
+            if ch in "([{⟨":
+                depth += 1
+            elif ch in ")]}⟩":
+                depth -= 1
+        end = start + len(code.rstrip())
+        if depth <= 0 or cur >= len(lines):
+            return cur, end
+        cur += 1
+        text, start = lines[cur - 1], 0
 
 
 def apply_suggestion(lines: list[str], ln: int, col: int, end_line: int, end_col: int, sug: str) -> bool:

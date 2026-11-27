@@ -123,3 +123,15 @@ def test_simp_suggestion_replaces_the_whole_multiline_call():
     lines = ["  · simp [foo,", "      bar] at h  -- note", "  exact h"]
     assert apply_suggestion(lines, 1, 4, 2, 15, "simp only [foo, bar, baz] at h")
     assert lines == ["  · simp only [foo, bar, baz] at h  -- note", "  exact h"]
+
+
+def test_simp_call_extent_includes_arguments():
+    from slop_destroyer.speed import apply_suggestion, call_extent
+
+    lines = ["  simp [foo, bar] at h -- note", "  exact h"]
+    end = call_extent(lines, 1, 2)
+    assert end == (1, 22)
+    assert apply_suggestion(lines, 1, 2, *end, "simp only [foo] at h")
+    assert lines[0] == "  simp only [foo] at h -- note"
+    multi = ["  · simp [foo,", "      bar] at h", "  exact h"]
+    assert call_extent(multi, 1, 4) == (2, 15)
