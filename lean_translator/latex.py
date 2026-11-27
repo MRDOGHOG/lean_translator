@@ -321,7 +321,10 @@ def _words(text: str, local_words: set[str]) -> str:
     out = []
     for k, p in enumerate(parts):
         single = len(p) == 1 and p.isalpha() and p not in "aAI"  # one-letter words are variables
-        if k % 2 == 1 and (p in local_words and len(p) <= 3 or single):
+        # "a" followed by a word is the article ("be a matrix"), not the variable a
+        article = (p == "a" and k + 2 < len(parts) and parts[k + 1] == " "
+                   and parts[k + 2][:1].islower() and parts[k + 2] not in local_words)
+        if k % 2 == 1 and not p.startswith("_") and not article and (p in local_words and len(p) <= 3 or single):
             out.append(f"${_ident(p, False)}$")
         else:
             out.append(esc(p))
