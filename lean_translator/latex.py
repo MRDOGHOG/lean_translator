@@ -148,6 +148,10 @@ class _Tex:
             base = op.split("[")[0]
             if base == "/":
                 return rf"\frac{{{self.tex(n.lhs)}}}{{{self.tex(n.rhs)}}}"
+            if base == "''":  # image f '' s
+                return f"{self.wrap(n.lhs, 1000)}\\left[{self.tex(n.rhs)}\\right]"
+            if base == "⁻¹'":  # preimage f ⁻¹' s
+                return f"{{{self.wrap(n.lhs, 1000)}}}^{{-1}}\\left[{self.tex(n.rhs)}\\right]"
             if base == "^":
                 return f"{{{self.wrap(n.lhs, 1000) if not self.atom(n.lhs) else self.tex(n.lhs)}}}^{{{self.tex(n.rhs)}}}"
             info = infix_info(op) or (50, False)
