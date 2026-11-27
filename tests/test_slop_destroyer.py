@@ -115,3 +115,11 @@ def test_redundant_never_aliases_to_a_dependent_or_generated_name():
 
     assert _AUTO.search("boxIndicator.eq_1") and _AUTO.search("foo.proof_2")
     assert not _AUTO.search("boxIndicator_apply")
+
+
+def test_simp_suggestion_replaces_the_whole_multiline_call():
+    from slop_destroyer.speed import apply_suggestion
+
+    lines = ["  · simp [foo,", "      bar] at h  -- note", "  exact h"]
+    assert apply_suggestion(lines, 1, 4, 2, 15, "simp only [foo, bar, baz] at h")
+    assert lines == ["  · simp only [foo, bar, baz] at h  -- note", "  exact h"]

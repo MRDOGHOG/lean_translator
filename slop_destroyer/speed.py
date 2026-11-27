@@ -121,13 +121,25 @@ def simp_only(path: Path, root: Path, lean_cmd: list[str], ranges: list[tuple[in
     done = 0
     for ln, s, e, call_end in sorted(calls, reverse=True):
         hit = suggestions.get((ln, s))
-        if not hit or not hit[2].startswith(("simp", "dsimp")):
-            continue
-        sug = hit[2]
-        # the suggestion is the complete call: replace from the keyword to the end of the call
-        new_lines[ln - 1] = new_lines[ln - 1][:s] + sug + new_lines[ln - 1][call_end:]
-        done += 1
+        if not hit or not hit[2].startswith(("simp", "dsimp")) or "✝" in hit[2]:
+            continue  # `✝` names are inaccessible: they can't be written back into source
+        end_line, end_col, sug = hit
+        if end_line == ln:
+            end_col -= 1  # the probe had one extra `?` on this line
+        if apply_suggestion(new_lines, ln, s, end_line, end_col, sug):
+            done += 1
     return ("\n".join(new_lines), done) if done else None
+
+
+def apply_suggestion(lines: list[str], ln: int, col: int, end_line: int, end_col: int, sug: str) -> bool:
+    """Replace the source range (ln, col)..(end_line, end_col) (1-based lines, 0-based columns)
+    with `sug`.  The range is the whole tactic call as Lean parsed it, so arguments that continue
+    on later lines are replaced too, not left behind."""
+    if end_line < ln or end_line > len(lines) or (end_line == ln and end_col < col):
+        return False
+    tail = lines[end_line - 1][end_col:]
+    lines[ln - 1 : end_line] = [lines[ln - 1][:col] + sug + tail]
+    return True
 
 
 def run(args) -> None:

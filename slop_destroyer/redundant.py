@@ -240,6 +240,9 @@ def _verify(root: Path, originals: dict[Path, str], build: list[str], rounds: in
             print((r.stdout + r.stderr)[-3000:], file=sys.stderr)
             bad = set(originals)
         print(f"[verify] restoring {len(bad)} file(s) that no longer compile")
+        errs = [l for l in (r.stdout + r.stderr).split("\n") if "error:" in l and ".lean:" in l]
+        for l in errs[:8]:
+            print("    " + l.strip()[:300])
         for f in bad:
             f.write_text(originals.pop(f), encoding="utf-8")
         if not originals:
