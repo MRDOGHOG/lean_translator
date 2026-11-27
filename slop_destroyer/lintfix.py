@@ -204,13 +204,26 @@ def run(args) -> None:
                     for f, text in originals.items():
                         f.write_text(text, encoding="utf-8")
                     originals.clear()
-                    subprocess.run(args.build.split(), cwd=root, capture_output=True, text=True)  # rebuild originals
+                    r = subprocess.run(args.build.split(), cwd=root, capture_output=True, text=True)  # rebuild originals
                     break
                 print(f"[pass {pas}] build failed in {len(bad)} edited file(s); restoring them", flush=True)
+                errs = [l for l in (r.stdout + r.stderr).split("\n") if "error:" in l and ".lean:" in l]
+                for l in errs[:6]:
+                    print("    " + l.strip()[:300], flush=True)
                 for f in bad:
                     f.write_text(originals.pop(f), encoding="utf-8")
             else:
-                sys.exit("could not get a clean build")
+                r = subprocess.run(args.build.split(), cwd=root, capture_output=True, text=True)
+            if r.returncode != 0:
+                # Out of rounds: never leave a broken project behind.
+                print(f"[pass {pas}] no clean build after {args.rounds} rounds; reverting the rest of this pass",
+                      flush=True)
+                for f, text in originals.items():
+                    f.write_text(text, encoding="utf-8")
+                originals.clear()
+                r = subprocess.run(args.build.split(), cwd=root, capture_output=True, text=True)
+                if r.returncode != 0:
+                    sys.exit("the restored original does not build:\n" + (r.stdout + r.stderr)[-3000:])
             done = sum((per_file[f] for f in originals), Counter())  # fixes that survived the build
             print(f"[pass {pas}] kept fixes: " + (", ".join(f"{k} {v:,}" for k, v in done.items()) or "none"))
         total += done

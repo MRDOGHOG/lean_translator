@@ -1,2 +1,2 @@
 # Editing this file starts the cached SLOP_DESTROYER verify + improve runs.
-run: 2 (2026-11-27T11:15:47Z) fixed error parsing, 1 lint pass
+run: 3 (2026-11-27T15:47:28Z) multi-line simp fix; lintfix never leaves a broken build

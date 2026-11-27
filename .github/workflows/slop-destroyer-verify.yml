@@ -137,7 +137,7 @@ jobs:
           PYTHONPATH: ${{ github.workspace }}/tool
         run: |
           start=$(date +%s)
-          python -m slop_destroyer lintfix --root . --write --verify --passes 1 -j 4 2>&1 | tee lintfix.log | tail -40
+          python -m slop_destroyer lintfix --root . --write --verify --passes 1 --rounds 6 -j 4 2>&1 | tee lintfix.log | tail -40
           grep -E "^\[pass|total fixes|\[verify\]" lintfix.log | tee -a "$GITHUB_STEP_SUMMARY" || true
           echo "lint-fix: $(( $(date +%s) - start ))s; $(grep 'total fixes' lintfix.log)" | tee -a "$GITHUB_STEP_SUMMARY"
           lines=$(find . -name '*.lean' -not -path './.lake/*' -print0 | xargs -0 cat | wc -l)

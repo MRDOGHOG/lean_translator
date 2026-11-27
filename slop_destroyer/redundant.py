@@ -248,5 +248,13 @@ def _verify(root: Path, originals: dict[Path, str], build: list[str], rounds: in
         if not originals:
             break
     r = subprocess.run(build, cwd=root, capture_output=True, text=True)
+    if r.returncode != 0 and originals:
+        # out of rounds: put the rest back so the project builds again
+        print(f"[verify] no clean build after {rounds} rounds; restoring the other {len(originals)} file(s)")
+        for f, text in originals.items():
+            f.write_text(text, encoding="utf-8")
+        originals.clear()
+        r = subprocess.run(build, cwd=root, capture_output=True, text=True)
     if r.returncode != 0:
         sys.exit("could not get a clean build")
+    print(f"[verify] build OK; {len(originals):,} changed files kept")
