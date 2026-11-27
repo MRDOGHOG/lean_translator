@@ -200,6 +200,7 @@ def run(args) -> None:
                     for f, text in originals.items():
                         f.write_text(text, encoding="utf-8")
                     originals.clear()
+                    subprocess.run(args.build.split(), cwd=root, capture_output=True, text=True)  # rebuild originals
                     break
                 print(f"[pass {pas}] build failed in {len(bad)} edited file(s); restoring them", flush=True)
                 for f in bad:

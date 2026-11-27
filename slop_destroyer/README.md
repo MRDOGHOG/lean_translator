@@ -123,6 +123,22 @@ replaced by the exact `simp only [...]` call that Lean's `simp?` suggests.
 That's the same proof with far less searching, and it can't break when the
 simp library changes. The changed files are rebuilt and re-profiled.
 
+## Measured on a real project (lsernau/grh-lean, `grh-compact`, 114k lines)
+
+| | |
+|---|---|
+| baseline `lake build` on GitHub's 4-core runner | 2 h 14 min |
+| constants Lean recorded for the project | 51,804 |
+| needed by the 5 headline theorems | 37,911 |
+| used by no proof term | 27 (26 anonymous instances + 1 lemma) |
+
+Deleting those 27 broke the build: instances can be needed while proofs are
+*checked* without appearing in any finished proof term. Graph mode now never
+deletes instances or classes. **Static mode's estimate for this project, about
+27,000 deletable lines, was far too high:** on dense code, text alone can't
+see most of the uses. Treat static numbers as an upper bound, and rely on
+graph mode for real deletions.
+
 ## Not handled
 
 - **Shrinking imports.** For that, use Mathlib's `shake`, which removes

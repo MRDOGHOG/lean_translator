@@ -155,6 +155,10 @@ def plan(root: Path, g: dict[str, Const], targets: list[str], keep_modules: list
                 continue
             if s.kind != "decl":
                 continue
+            if s.head in ("instance", "class"):
+                # Instances can be needed while proofs are *checked* even when no finished
+                # proof term mentions them (seen on a real 114k-line project): never delete.
+                continue
             inside = [c for c in consts if c.start and s.start <= c.start <= s.end]
             if not inside:
                 continue  # Lean placed nothing here; leave it alone
@@ -292,4 +296,8 @@ def run(args) -> None:
         if not ok:
             for path, text in originals.items():
                 path.write_text(text, encoding="utf-8")
-            sys.exit("could not get a clean build; all files restored")
+            print("no deletion survived the rebuild; all files restored, rebuilding the original", file=sys.stderr)
+            r = subprocess.run(args.build.split(), cwd=root, capture_output=True, text=True)
+            if r.returncode != 0:
+                sys.exit("the restored original does not build either:\n" + (r.stdout + r.stderr)[-3000:])
+            print("result: nothing could be safely deleted (the project is already minimal at this level)")
