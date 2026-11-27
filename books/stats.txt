@@ -1,0 +1,4 @@
+latex: 794 files, 400 declarations, 209 proofs (744 steps) -> ../../out/rh-tour.tex in 4.9s; headline theorems found: riemannHypothesis, riemannZeta_eq_zero_re, LFunction_ne_zero_of_half_lt_re, LFunction_eq_zero_re, LFunction_eq_zero_re_of_isPrimitive
+latex: 794 files, 10,944 declarations, 7,057 proofs (20,332 steps) -> ../../out/rh-full.tex in 12.5s; headline theorems found: riemannHypothesis, riemannZeta_eq_zero_re, LFunction_ne_zero_of_half_lt_re, LFunction_eq_zero_re, LFunction_eq_zero_re_of_isPrimitive
+rh-tour.pdf: 93 pages, 0 LaTeX errors, 216s
+rh-full.pdf: 2835 pages, 0 LaTeX errors, 537s
