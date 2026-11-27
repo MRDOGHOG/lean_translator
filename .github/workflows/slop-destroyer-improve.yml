@@ -15,6 +15,9 @@ on:
         default: lsernau/grh-lean
       subdir:
         default: grh-compact
+  push:
+    branches: [claude/optimistic-tesla-pw5s77]
+    paths: [".github/slop-run"]  # edit this file to start a run (after the prebuild has cached the build)
 
 permissions:
   contents: read
