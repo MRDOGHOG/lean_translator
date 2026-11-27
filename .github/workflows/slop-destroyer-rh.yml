@@ -1,0 +1,108 @@
+# Runs SLOP_DESTROYER (static mode: no compiler, no Lean toolchain) on a Lean
+# repository entirely on GitHub's machines, so nothing is downloaded locally.
+# Results: the run's summary page, plus a downloadable "slop-report" artifact
+# with report.md, deletions.tsv, kept.tsv and slop.patch.gz (the cleaned-up
+# version as a git patch you can apply or read).
+name: SLOP_DESTROYER on riemann-hypothesis
+
+on:
+  workflow_dispatch:
+    inputs:
+      repo:
+        description: "Repository to scan (owner/name)"
+        default: "leanprover-community/riemann-hypothesis"
+      keep:
+        description: "Theorem(s) to keep, comma-separated (empty = auto-detect theorems stating RiemannHypothesis)"
+        default: ""
+  push:
+    branches: [claude/optimistic-tesla-pw5s77]
+    paths: [".github/workflows/slop-destroyer-rh.yml", "slop_destroyer/**"]
+
+permissions:
+  contents: read
+
+jobs:
+  scan:
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    env:
+      TARGET_REPO: ${{ inputs.repo || 'leanprover-community/riemann-hypothesis' }}
+      KEEP: ${{ inputs.keep || '' }}
+    steps:
+      - name: Check out SLOP_DESTROYER
+        uses: actions/checkout@v4
+
+      - name: Check out the repository to scan (latest commit only)
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ env.TARGET_REPO }}
+          path: target
+          fetch-depth: 1
+          persist-credentials: false
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Size of the repository
+        run: |
+          echo "commit: $(git -C target rev-parse HEAD)"
+          find target -name '*.lean' -not -path '*/.lake/*' | wc -l | xargs echo ".lean files:"
+          find target -name '*.lean' -not -path '*/.lake/*' -print0 | xargs -0 cat | wc -l | xargs echo "lines:"
+          free -g
+
+      - name: Find the theorem(s) to keep
+        id: keep
+        run: |
+          if [ -n "$KEEP" ]; then
+            keep="$KEEP"
+          else
+            # theorems whose statement is exactly `RiemannHypothesis`
+            keep=$(python -m slop_destroyer.find_theorems target RiemannHypothesis | paste -sd, -) || true
+            if [ -z "$keep" ]; then
+              echo "::error::no theorem stating RiemannHypothesis found; rerun with the 'keep' input set"
+              exit 1
+            fi
+          fi
+          echo "keeping: $keep"
+          echo "keep=$keep" >> "$GITHUB_OUTPUT"
+
+      - name: Run SLOP_DESTROYER (static mode)
+        run: |
+          args=()
+          IFS=',' read -ra names <<< "${{ steps.keep.outputs.keep }}"
+          for n in "${names[@]}"; do args+=(--keep "$(echo "$n" | xargs)"); done
+          timer=(); [ -x /usr/bin/time ] && timer=(/usr/bin/time -v)
+          "${timer[@]}" python -m slop_destroyer static --root target "${args[@]}" \
+            --report report --write --show 30 2> >(tee time.log >&2)
+          grep -E "Maximum resident|Elapsed" time.log | tee -a report/resources.txt || true
+
+      - name: Make the patch
+        if: always()
+        run: |
+          mkdir -p report
+          cd target
+          git diff --shortstat | tee ../report/diffstat.txt
+          git diff | gzip -9 > ../report/slop.patch.gz
+          ls -la ../report
+
+      - name: Write the run summary
+        if: always()
+        run: |
+          {
+            echo "Scanned \`$TARGET_REPO\` at \`$(git -C target rev-parse --short HEAD)\`"
+            echo
+            [ -f report/report.md ] && sed -n '1,80p' report/report.md
+            echo
+            echo "Patch: $(cat report/diffstat.txt 2>/dev/null)"
+            echo
+            cat report/resources.txt 2>/dev/null
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload the report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: slop-report
+          path: report/
+          retention-days: 30

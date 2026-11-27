@@ -93,6 +93,7 @@ def main(argv: list[str] | None = None) -> None:
     s.add_argument("--include", action="append", help="only these subdirectories/files of --root (e.g. Mathlib)")
     s.add_argument("--show", type=int, default=0, help="list the first N deletions")
     s.add_argument("--write", action="store_true", help="actually edit the files")
+    s.add_argument("--report", help="directory for report.md, deletions.tsv and kept.tsv")
     s.add_argument("-j", "--jobs", type=int, default=0)
     s.set_defaults(func=cmd_static)
 

@@ -120,9 +120,10 @@ def plan(root: Path, g: dict[str, Const], targets: list[str], keep_modules: list
         for k in kept_items:
             it = items[k]
             for ident, dotted in it.refs:
-                now, _ = R.resolve(ident, dotted, it.ctx)
-                for i in now:
-                    named.update(n for n in items[i].names if n in g)
+                nows, _ = R.resolve(ident, dotted, it.ctx)
+                for found in nows:
+                    for i in found:
+                        named.update(n for n in items[i].names if n in g)
         new = named - keep
         if not new:
             break

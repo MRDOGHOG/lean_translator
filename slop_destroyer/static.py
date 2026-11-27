@@ -36,6 +36,7 @@ import time
 from collections import defaultdict
 from concurrent.futures import ProcessPoolExecutor
 from dataclasses import dataclass, field
+from itertools import chain
 from pathlib import Path
 
 from lean_translator.decls import extract_decls
@@ -65,7 +66,24 @@ NOT_NAMES = {
 }
 
 
-@dataclass
+_I = sys.intern
+
+
+def _shrink(items: list["Item"]) -> list["Item"]:
+    """Intern every string and share identical tuples: a 17M-line project has
+    millions of repeated identifiers, and this is what keeps memory in check."""
+    ctxs: dict[tuple, tuple] = {}
+    for it in items:
+        it.names = [_I(n) for n in it.names]
+        it.refs = [(_I(r), d) for r, d in it.refs]
+        it.sig_refs = [_I(r) for r in it.sig_refs]
+        it.ctx = ctxs.setdefault(it.ctx, tuple(_I(c) for c in it.ctx))
+        it.head = _I(it.head)
+        it.kind = _I(it.kind)
+    return items
+
+
+@dataclass(slots=True)
 class Item:
     file: Path
     start: int
@@ -249,7 +267,7 @@ def scan_file(path_str: str) -> list[Item]:
         root = (s.kind in ("structural", "other") and s.head != "alias") or (s.kind == "decl" and not names)
         items.append(Item(path, s.start, s.end, "alias" if s.head == "alias" else s.kind, s.head, names,
                           list(dict.fromkeys(refs)), list(dict.fromkeys(sig_refs)), tuple(ctx), root, invisible))
-    return items
+    return _shrink(items)
 
 
 @dataclass
@@ -270,6 +288,8 @@ class Resolver:
                 self.by_full[n].append(k)
                 self.by_last[n.rsplit(".", 1)[-1]].append(k)
         self.cache: dict[tuple, tuple[list[int], list[tuple[int, list[int]]]]] = {}
+        self.cache_limit = 2_000_000
+        self.dot_cache: dict[str, tuple] = {}
 
     def lookup(self, full: str, generated: bool) -> list[int]:
         """Exact name, or (if `generated`) a name generated from a declaration
@@ -281,36 +301,57 @@ class Resolver:
             return self.by_full.get(full.rsplit(".", 1)[0], [])
         return []
 
+    def _dot(self, p: str) -> tuple[tuple[int, ...], tuple[tuple[int, tuple[int, ...]], ...]]:
+        """Candidates for dot notation `_.p`, built once per field name and shared."""
+        hit = self.dot_cache.get(p)
+        if hit is not None:
+            return hit
+        now, later = [], []
+        for i in self.by_last.get(p, ()):
+            for n in self.items[i].names:
+                if "." not in n or n.rsplit(".", 1)[-1] != p:
+                    continue
+                owner = self.by_full.get(n.rsplit(".", 1)[0])
+                if owner:
+                    later.append((i, tuple(owner)))
+                else:
+                    now.append(i)  # namespace from core Lean: can't rule it out
+        res = (tuple(now), tuple(later))
+        self.dot_cache[p] = res
+        return res
+
     def resolve(self, ident: str, dotted: bool, ctx: tuple[str, ...]):
-        """Returns (keep now, [(candidate, namespace decls it waits on)])."""
+        """Returns (lists of declarations to keep now,
+                    lists of (candidate, namespace decls it waits on)).
+        Lists are shared, never copied: iterate, don't mutate."""
         key = (ident, dotted, ctx)
-        if key in self.cache:
-            return self.cache[key]
-        now: list[int] = []
-        later: list[tuple[int, list[int]]] = []
+        hit = self.cache.get(key)
+        if hit is not None:
+            return hit
+        nows: list = []
+        laters: list = []
         multi = "." in ident.removeprefix("_root_.")
         if ident.startswith("_root_."):
-            now += self.lookup(ident[len("_root_."):], multi)
+            nows.append(self.lookup(ident[len("_root_."):], multi))
         elif not dotted:
             for base in ctx:
-                now += self.lookup(f"{base}.{ident}" if base else ident, multi)
+                found = self.lookup(f"{base}.{ident}" if base else ident, multi)
+                if found:
+                    nows.append(found)
         parts = [p for p in ident.removeprefix("_root_.").split(".") if p]
         # Dot notation: `h.foo.bar`, `(e).foo`, `.foo` -> fields of unknown types.
         # A capitalised head (`Prod.mk`, `List.map`) is a namespace, not a local.
         local_head = bool(parts) and not parts[0][:1].isupper()
-        if dotted or (not now and len(parts) > 1 and local_head):
-            tail = parts if dotted else parts[1:]
-            for p in tail:
-                for i in self.by_last.get(p, ()):
-                    for n in self.items[i].names:
-                        if n.rsplit(".", 1)[-1] != p or "." not in n:
-                            continue
-                        owner = self.by_full.get(n.rsplit(".", 1)[0], [])
-                        if owner:
-                            later.append((i, owner))
-                        else:
-                            now.append(i)  # namespace from core Lean: can't rule it out
-        res = (now, later)
+        if dotted or (not nows and len(parts) > 1 and local_head):
+            for p in (parts if dotted else parts[1:]):
+                dn, dl = self._dot(p)
+                if dn:
+                    nows.append(dn)
+                if dl:
+                    laters.append(dl)
+        res = (tuple(nows), tuple(laters))
+        if len(self.cache) >= self.cache_limit:
+            self.cache.clear()  # bounded memory; entries are cheap to recompute
         self.cache[key] = res
         return res
 
@@ -320,6 +361,8 @@ def analyse(files: list[Path], targets: list[str], jobs: int = 0) -> Result:
     with ProcessPoolExecutor(max_workers=jobs or os.cpu_count()) as ex:
         per_file = list(ex.map(scan_file, [str(f) for f in files], chunksize=32))
     items = [it for chunk in per_file for it in chunk]
+    del per_file
+    items = _shrink(items)  # strings from different worker processes are separate copies
     R = Resolver(items)
 
     seeds: list[int] = []
@@ -336,8 +379,8 @@ def analyse(files: list[Path], targets: list[str], jobs: int = 0) -> Result:
         if it.kind == "attribute":
             attr_names, depth = [], 0
             for ident, dotted in it.refs:
-                now, _ = R.resolve(ident, dotted, it.ctx)
-                for i in now:
+                nows, _ = R.resolve(ident, dotted, it.ctx)
+                for i in chain.from_iterable(nows):
                     waiting[i].append(k)  # kept as soon as any target is kept...
                     if not items[i].invisible:
                         items[i].invisible = True  # ...and its targets become invisibly usable
@@ -346,8 +389,8 @@ def analyse(files: list[Path], targets: list[str], jobs: int = 0) -> Result:
             continue
         mentioned = set()
         for ident in it.sig_refs:
-            now, later = R.resolve(ident, False, it.ctx)
-            mentioned.update(i for i in now if i != k)
+            nows, _ = R.resolve(ident, False, it.ctx)
+            mentioned.update(i for i in chain.from_iterable(nows) if i != k)
         if not mentioned:
             seeds.append(k)  # mentions nothing from the project: could fire anywhere
         for i in mentioned:
@@ -363,9 +406,9 @@ def analyse(files: list[Path], targets: list[str], jobs: int = 0) -> Result:
         stack.extend(w for w in waiting.pop(k, ()) if w not in keep)
         it = items[k]
         for ident, dotted in it.refs:
-            now, later = R.resolve(ident, dotted, it.ctx)
-            stack.extend(i for i in now if i not in keep)
-            for cand, owners in later:
+            nows, laters = R.resolve(ident, dotted, it.ctx)
+            stack.extend(i for i in chain.from_iterable(nows) if i not in keep)
+            for cand, owners in chain.from_iterable(laters):
                 if cand in keep:
                     continue
                 if any(o in keep for o in owners):
@@ -407,9 +450,75 @@ def run(args) -> None:
             print(f"  - {it.file.relative_to(root)}:{it.start}  {it.head} {', '.join(it.names[:1])}")
         if len(res.deleted) > args.show:
             print(f"  ... and {len(res.deleted) - args.show:,} more")
+    if getattr(args, "report", None):
+        write_report(Path(args.report), root, files, res, total_lines, args.keep)
+        print(f"report written to {args.report}/")
     if not args.write:
         print("dry run: nothing written (use --write; commit first so you can review and revert)")
         return
     for path, dels in touched.items():
         path.write_text(render(path.read_text(encoding="utf-8"), dels), encoding="utf-8")
     print(f"wrote {len(touched):,} files. Run one build (`lake build`) to confirm.")
+
+
+def write_report(out: Path, root: Path, files: list[Path], res: Result, total_lines: int, targets: list[str]) -> None:
+    """report.md (human summary) + deletions.tsv (every deletion) + kept.tsv (every kept declaration)."""
+    out.mkdir(parents=True, exist_ok=True)
+    rel = lambda p: str(p.relative_to(root))
+    decls = [it for it in res.items if it.kind in ("decl", "alias")]
+    deleted_ids = {id(it) for it in res.deleted}
+    with open(out / "deletions.tsv", "w", encoding="utf-8") as f:
+        f.write("file\tstart_line\tend_line\tkind\tname\n")
+        for it in res.deleted:
+            f.write(f"{rel(it.file)}\t{it.start}\t{it.end}\t{it.head}\t{(it.names or [''])[0]}\n")
+    with open(out / "kept.tsv", "w", encoding="utf-8") as f:
+        f.write("file\tstart_line\tkind\tname\n")
+        for it in decls:
+            if id(it) not in deleted_ids:
+                f.write(f"{rel(it.file)}\t{it.start}\t{it.head}\t{(it.names or [''])[0]}\n")
+
+    del_lines = sum(it.end - it.start + 1 for it in res.deleted)
+    by_dir: dict[str, list[int]] = defaultdict(lambda: [0, 0, 0])  # decls, deleted decls, deleted lines
+    by_file: dict[str, int] = defaultdict(int)
+    for it in decls:
+        by_dir[rel(it.file).split("/")[0]][0] += 1
+    for it in res.deleted:
+        d = by_dir[rel(it.file).split("/")[0]]
+        d[1] += it.kind in ("decl", "alias")
+        d[2] += it.end - it.start + 1
+        by_file[rel(it.file)] += it.end - it.start + 1
+    files_with_kept = {it.file for it in decls if id(it) not in deleted_ids}
+    files_fully_dead = len({it.file for it in res.deleted} - files_with_kept)
+    lines = [
+        "# SLOP_DESTROYER report (static mode, no compiler)",
+        "",
+        f"**Kept theorem(s):** {', '.join(f'`{t}`' for t in targets)}",
+        "",
+        "| | |",
+        "|---|---|",
+        f"| files scanned | {len(files):,} |",
+        f"| lines scanned | {total_lines:,} |",
+        f"| declarations | {len(decls):,} |",
+        f"| deletable declarations | {sum(1 for it in res.deleted if it.kind in ('decl', 'alias')):,} |",
+        f"| deletable other commands (#check, #eval, example, attribute) | "
+        f"{sum(1 for it in res.deleted if it.kind not in ('decl', 'alias')):,} |",
+        f"| deletable lines | {del_lines:,} ({100 * del_lines / max(total_lines, 1):.1f}%) |",
+        f"| files left with no declarations | {files_fully_dead:,} |",
+        f"| analysis time | {res.seconds:.0f}s |",
+        "",
+        "Static mode is conservative: it keeps anything that *might* be used invisibly "
+        "(instances, `@[simp]` lemmas, ... whose statement mentions something kept). "
+        "Nothing here has been checked by compiling; run one build on the result to confirm.",
+        "",
+        "## By top-level directory",
+        "",
+        "| directory | declarations | deletable | deletable lines |",
+        "|---|---:|---:|---:|",
+    ]
+    for d, (n, nd, nl) in sorted(by_dir.items(), key=lambda kv: -kv[1][2]):
+        lines.append(f"| `{d}` | {n:,} | {nd:,} | {nl:,} |")
+    lines += ["", "## Files with the most deletable lines", "", "| file | deletable lines |", "|---|---:|"]
+    for f_, nl in sorted(by_file.items(), key=lambda kv: -kv[1])[:40]:
+        lines.append(f"| `{f_}` | {nl:,} |")
+    lines += ["", "Full lists: `deletions.tsv`, `kept.tsv`."]
+    (out / "report.md").write_text("\n".join(lines) + "\n", encoding="utf-8")
