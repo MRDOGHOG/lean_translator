@@ -88,7 +88,7 @@ class _Tex:
         if ident in self.locals or "." not in ident:
             return _ident(ident, ident in self.locals and len(ident) > 1)
         head, field_ = ident.split(".", 1)
-        if (head in self.locals or (len(head) <= 2 and head[:1].islower())) and "." not in field_:
+        if (head in self.locals or len(head) <= 2) and "." not in field_:
             return self.tex(Proj(Name(head), field_))  # `s.re` where s is a variable
         last = ident.rsplit(".", 1)[-1]
         if last in _FUNC:
@@ -123,7 +123,7 @@ class _Tex:
         for b in q.binders:
             names = ", ".join(self.name(x) for x in b.names)
             if b.bound_op and b.bound is not None:
-                parts.append(f"{names} {_OPS.get(b.bound_op, b.bound_op)} {self.tex(b.bound)}")
+                parts.append(f"{names} {_OPS.get(b.bound_op, _sym(b.bound_op))} {self.tex(b.bound)}")
             elif b.type is not None and q.q in ("∀", "∃", "∃!"):
                 parts.append(f"{names} \\in {self.tex(b.type)}")
             else:
@@ -156,7 +156,7 @@ class _Tex:
             rhs = self.wrap(n.rhs, p + (0 if right else 1))
             if base == "*" and isinstance(n.lhs, Num) and isinstance(n.rhs, (Name, App)):
                 return f"{lhs}\\,{rhs}"
-            sym = _OPS.get(base, base)
+            sym = _OPS.get(base, _sym(base))
             if base.endswith("ᶠ"):
                 sym = _OPS.get(base[:-1], base[:-1]) + r"^{\mathrm{ev}}"
             if base in ("..",):
@@ -169,9 +169,11 @@ class _Tex:
                 return rf"\sqrt{{{self.tex(n.arg)}}}"
             if n.op == "¬":
                 return rf"\neg {self.wrap(n.arg, 40)}"
-            return f"{n.op}{self.wrap(n.arg, 75)}"
+            if n.op == "#":  # cardinality
+                return rf"\#{self.wrap(n.arg, 75)}"
+            return f"{_sym(n.op)}{self.wrap(n.arg, 75)}"
         if isinstance(n, Post):
-            sup = {"⁻¹": "^{-1}", "ᶜ": "^{c}", "!": "!"}.get(n.op, f"^{{{n.op}}}")
+            sup = {"⁻¹": "^{-1}", "ᶜ": "^{c}", "!": "!"}.get(n.op, f"^{{{_sym(n.op)}}}")
             inner = self.tex(n.arg)
             return (inner if self.atom(n.arg) else rf"\left({inner}\right)") + sup
         if isinstance(n, App):
@@ -210,7 +212,7 @@ class _Tex:
                 return rf"\int{lim} {body}{d}"
             if n.q in _BIG:
                 return f"{_BIG[n.q]}_{{{self.binders(n)}}} {body}"
-            return f"{n.q} {self.binders(n)},\\ {body}"
+            return f"{_sym(n.q)} {self.binders(n)},\\ {body}"
         if isinstance(n, Ite):
             return (r"\begin{cases} %s & \text{if } %s,\\ %s & \text{otherwise} \end{cases}"
                     % (self.tex(n.then), self.tex(n.cond), self.tex(n.other)))
@@ -236,6 +238,34 @@ class _Tex:
         return r"\text{?}"
 
 
+def _sym(op: str) -> str:
+    """An operator with no LaTeX name: printed as itself, LaTeX's special characters escaped."""
+    return "".join({"#": r"\#", "%": r"\%", "&": r"\&", "$": r"\$", "_": r"\_", "~": r"\sim ",
+                    "^": r"\hat{}", "\\": r"\setminus "}.get(ch, ch) for ch in op)
+
+
+def safe_math(s: str) -> bool:
+    r"""Cheap check that a math string can't break the document: balanced braces and
+    \left/\right, no unescaped special characters."""
+    depth = 0
+    k = 0
+    while k < len(s):
+        ch = s[k]
+        if ch == "\\":
+            k += 2
+            continue
+        if ch == "{":
+            depth += 1
+        elif ch == "}":
+            depth -= 1
+            if depth < 0:
+                return False
+        elif ch in "#%&$":
+            return False
+        k += 1
+    return depth == 0 and s.count("\\left") == s.count("\\right") and s.count("\\begin{") == s.count("\\end{")
+
+
 def tex_math(n: Node, locals_: set[str] | None = None) -> str:
     """A parsed Lean term as LaTeX math (without the surrounding $...$)."""
     try:
@@ -244,6 +274,8 @@ def tex_math(n: Node, locals_: set[str] | None = None) -> str:
         return r"\text{(formula too deep)}"
     if len(s) > _MAX_TEX:
         return r"\text{(long formula, see the Lean source)}"
+    if not safe_math(s):
+        return r"\text{(formula, see the Lean source)}"
     return s
 
 
