@@ -84,7 +84,8 @@ def main(argv: list[str] | None = None) -> None:
     g.add_argument("--write", action="store_true", help="actually edit the files")
     g.add_argument("--verify", action="store_true", help="after writing, build once and repair if needed")
     g.add_argument("--build", default="lake build")
-    g.add_argument("--rounds", type=int, default=3)
+    g.add_argument("--rounds", type=int, default=0, help="max rebuilds when repairing (0 = auto)")
+    g.add_argument("--src-dir", action="append", default=[], help="extra lake srcDir(s) to look for sources in")
     g.set_defaults(func=cmd_graph)
 
     s = sub.add_parser("static", help="whole project, no compiler at all: follow names through the source")

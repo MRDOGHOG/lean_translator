@@ -6,6 +6,7 @@ prints the full names, one per line.  Only files mentioning the name are parsed.
 
 from __future__ import annotations
 
+import re
 import subprocess
 import sys
 from pathlib import Path
@@ -33,6 +34,20 @@ def find_with_locations(root: Path, prop: str) -> list[tuple[str, str, int, str]
     return out
 
 
+def headline(root: Path, prop: str) -> list[tuple[str, str]]:
+    """Every theorem in the file(s) that genuinely prove `prop` (not a `sorry`
+    placeholder like a Challenge.lean): those are the project's headline results."""
+    files = sorted({file for _, file, _, text in find_with_locations(root, prop)
+                    if not re.search(r"\bsorry\b", text)})
+    out = []
+    for file in files:
+        src = (root / file).read_text(encoding="utf-8", errors="replace")
+        for d in extract_decls(src, file):
+            if d.kind in ("theorem", "lemma") and d.full_name:
+                out.append((d.full_name, file))
+    return out
+
+
 def find(root: Path, prop: str) -> list[str]:
     r = subprocess.run(["grep", "-rlF", "--include=*.lean", "--exclude-dir=.lake", prop, str(root)],
                        capture_output=True, text=True)
@@ -47,6 +62,10 @@ def find(root: Path, prop: str) -> list[str]:
 
 
 if __name__ == "__main__":
+    if len(sys.argv) > 3 and sys.argv[3] == "--headline":
+        found = headline(Path(sys.argv[1]), sys.argv[2])
+        print("\n".join(name for name, _ in found))
+        sys.exit(0 if found else 1)
     if len(sys.argv) > 3 and sys.argv[3] == "--where":
         base = sys.argv[4] if len(sys.argv) > 4 else ""
         found = find_with_locations(Path(sys.argv[1]), sys.argv[2])

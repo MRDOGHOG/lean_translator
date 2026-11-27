@@ -82,8 +82,17 @@ def reachable(g: dict[str, Const], targets: list[str]) -> set[str]:
     return seen
 
 
+SRC_DIRS = [".", "src", "Src", "lib"]
+
+
 def module_path(root: Path, module: str) -> Path:
-    return root / (module.replace(".", "/") + ".lean")
+    """Source file of a module, trying the usual lake `srcDir`s."""
+    rel = module.replace(".", "/") + ".lean"
+    for d in SRC_DIRS:
+        p = (root / d / rel).resolve()
+        if p.exists():
+            return p
+    return root / rel
 
 
 def plan(root: Path, g: dict[str, Const], targets: list[str], keep_modules: list[str]) -> Plan:
@@ -203,7 +212,8 @@ _UNKNOWN = re.compile(r"unknown (?:identifier|constant|declaration) '([^']+)'")
 
 
 def verify_and_repair(root: Path, p: Plan, originals: dict[Path, str], build_cmd: list[str], rounds: int) -> bool:
-    rounds = max(rounds, 2 + sum(len(v) for v in p.deleted_spans.values()).bit_length())
+    if rounds <= 0:  # auto: enough rounds to bisect the deletions
+        rounds = 2 + sum(len(v) for v in p.deleted_spans.values()).bit_length()
     """Build once; if errors name deleted declarations, restore those and rebuild."""
     for k in range(rounds):
         t0 = time.time()
@@ -248,6 +258,7 @@ def verify_and_repair(root: Path, p: Plan, originals: dict[Path, str], build_cmd
 
 def run(args) -> None:
     root = Path(args.root).resolve()
+    SRC_DIRS[:0] = list(getattr(args, "src_dir", []) or [])
     lean_cmd = args.lean.split()
     import tempfile
 
