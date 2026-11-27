@@ -87,6 +87,9 @@ class _Tex:
             return _CONST[ident]
         if ident in self.locals or "." not in ident:
             return _ident(ident, ident in self.locals and len(ident) > 1)
+        head, field_ = ident.split(".", 1)
+        if (head in self.locals or (len(head) <= 2 and head[:1].islower())) and "." not in field_:
+            return self.tex(Proj(Name(head), field_))  # `s.re` where s is a variable
         last = ident.rsplit(".", 1)[-1]
         if last in _FUNC:
             return _FUNC[last]
@@ -445,7 +448,7 @@ def proof_map_tex(roots: list[str], uses: dict[str, list[str]], max_nodes: int =
     return "\n".join(lines)
 
 
-def decl_tex(d: Decl, tactic_counts: Counter, proof_lengths: list[int]) -> str:
+def decl_tex(d: Decl, tactic_counts: Counter, proof_lengths: list[int], means: dict[str, str] | None = None) -> str:
     from .proofs import narrate
 
     kind = {"theorem": "Theorem", "lemma": "Lemma", "def": "Definition", "abbrev": "Definition",
@@ -456,6 +459,13 @@ def decl_tex(d: Decl, tactic_counts: Counter, proof_lengths: list[int]) -> str:
         stmt = statement_tex(d)
     except Exception:
         stmt = r"\leanc{%s}" % esc_code(d.signature[:400])
+    from .proofs import prop_name
+
+    pn = prop_name(d)
+    if pn and means:
+        meaning = means.get(pn) or means.get(pn.rsplit(".", 1)[-1])
+        if meaning:
+            stmt += r" Here, \emph{%s} means: %s" % (esc(pn), meaning)
     out = [r"\begin{leandecl}{%s}{%s}{%s}" % (kind, esc_code(name), esc_code(name)), stmt, r"\end{leandecl}"]
     try:
         steps = narrate(d, Glosser(), tex=True)
@@ -540,6 +550,14 @@ def write_book(src_dir: str, output: str, title: str, first: list[str], headline
             if d.full_name:
                 names.setdefault(d.full_name, d.full_name)
                 names.setdefault(d.full_name.rsplit(".", 1)[-1], d.full_name)
+    from .proofs import KNOWN_PROPS, meanings
+
+    means = {k: v[1] for k, v in KNOWN_PROPS.items()}
+    for mname, md in meanings([d for ds in decls.values() for d in ds]).items():
+        try:
+            means[mname] = statement_tex(md)
+        except Exception:
+            pass
     tactic_counts: Counter = Counter()
     proof_lengths: list[int] = []
     uses: dict[str, list[str]] = {}
@@ -557,7 +575,7 @@ def write_book(src_dir: str, output: str, title: str, first: list[str], headline
             tactic_counts.update(_tactic_heads(d))
             if d.full_name:
                 uses[d.full_name] = _proof_mentions(d, names)
-            body_parts.append(decl_tex(d, tactic_counts, proof_lengths))
+            body_parts.append(decl_tex(d, tactic_counts, proof_lengths, means))
 
     roots = [names[h] for h in headline if h in names]
     lines_per_area = Counter()

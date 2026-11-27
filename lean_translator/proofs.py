@@ -73,6 +73,7 @@ def _units(toks: list[Token]) -> list[Step]:
                        and first.col <= cur.toks[1].col)
         cont = cur is not None and not bullet_body and (
             depth > 0
+            or (first.col > cur.col and first.text in ("(", "[", "⟨", ",", "←"))  # argument wrapped over lines
             or (first.col > cur.col and cur.toks[-1].text not in ("by", "=>", "·", "do", "from")
                 and first.text not in _STARTERS and not _opens_block(cur))
         )
@@ -339,6 +340,48 @@ def _sentence(toks: list[Token], m: _Math) -> str:
         if rest and rest[0].text == "⟨":
             return f"Build the required object piece by piece: {code(rest)}."
         return f"Apply {code(rest)}; it remains to check its hypotheses."
+    if head in ("grw", "nth_grw", "gcongr_rw"):
+        items = _bracket_items(rest if rest and rest[0].text == "[" else rest[1:], m)
+        return f"Rewrite with the inequalities {_list(items) or code(rest)}{_loc(rest, m)}."
+    if head in ("convert", "convert_to"):
+        e, using = _split_at(rest, "using")
+        return f"This matches {code(e)} up to the differences that remain to be checked."
+    if head in ("repeat", "repeat'", "iterate"):
+        inner = rest[1:] if rest and rest[0].kind == "num" else rest
+        return f"Repeatedly: {_lower(_sentence(inner, m))}" if inner else "Repeat."
+    if head == "try":
+        return f"If possible: {_lower(_sentence(rest, m))}" if rest else ""
+    if head in ("lia", "cutsat"):
+        return "By integer arithmetic."
+    if head == "peel":
+        return f"Strip the matching quantifiers from {code(rest)}."
+    if head in ("generalize", "generalize'"):
+        return f"Generalise: {code(rest)}."
+    if head in ("split_ifs", "split_if"):
+        return "Split into cases according to the conditions of the if-then-else expressions."
+    if head == "field":
+        return "By field arithmetic."
+    if head in ("lift",):
+        return f"Lift {code(rest)}."
+    if head in ("rify", "qify", "zify", "push_cast"):
+        target = {"rify": "real numbers", "qify": "rational numbers", "zify": "integers"}.get(head, "")
+        return f"Move the statement to {target}." if target else "Push the casts inward."
+    if head in ("swap", "rotate", "pick_goal"):
+        return "Work on the next goal first."
+    if head in ("ac_rfl",):
+        return "By associativity and commutativity."
+    if head == "apply_fun":
+        return f"Apply {code(rest)} to both sides."
+    if head == "wlog":
+        names, stmt = _split_at(rest, ":")
+        stmt, _ = _split_at(stmt or [], "with")
+        return f"Without loss of generality, assume {m.prop(stmt) if stmt else code(rest)}."
+    if head in ("algebraize",):
+        return f"Turn the ring maps {code(rest)} into algebra structures."
+    if head in ("aesop_cat", "simp_intro"):
+        return "By automatic reasoning." if head == "aesop_cat" else "Introduce the hypotheses and simplify."
+    if head in ("seal", "unseal"):
+        return ""
     if head in ("rw", "rewrite", "rwa", "nth_rewrite", "nth_rw", "erw", "simp_rw"):
         items = _bracket_items(rest if rest and rest[0].text == "[" else rest[1:], m)
         what = _list(items) or code(rest)
@@ -470,8 +513,17 @@ def narrate(d: Decl, g: Glosser | None = None, tex: bool = False) -> list[tuple[
     if head != ":=" or len(toks) < 2:
         return []
     body = toks[1:]
+    intro: list[tuple[int, str]] = []
+    if body[0].text in ("fun", "λ"):  # `fun x y ↦ by tac` / `fun x ↦ term`
+        arrow = next((k for k, t in enumerate(body) if t.text in ("↦", "=>")), None)
+        if arrow is not None and arrow + 1 < len(body):
+            names = m.names(body[1:arrow])
+            g.locals.update(names)
+            if names:
+                intro.append((0, f"Let {_list([f'`{n}`' for n in names])} be arbitrary."))
+            body = body[arrow + 1:]
     if body[0].text != "by":
-        return [(0, f"This follows directly from {m.code(body)}.")]
+        return intro + [(0, f"This follows directly from {m.code(body)}.")]
     tac = body[1:]
     if not tac:
         return []
@@ -489,4 +541,31 @@ def narrate(d: Decl, g: Glosser | None = None, tex: bool = False) -> list[tuple[
             walk(s.children, depth + 1)
 
     walk(_tree(_units(tac)), 0)
-    return [(dp, s) for dp, s in out if s]
+    return intro + [(dp, s) for dp, s in out if s]
+
+
+# ---------------------------------------------------------------- named statements
+KNOWN_PROPS = {
+    "RiemannHypothesis": (
+        "every zero s of the Riemann zeta function that is not a trivial zero (s ≠ -2, -4, -6, …) "
+        "and is not s = 1 has real part 1/2.",
+        r"every zero $s$ of the Riemann zeta function $\zeta$ that is not a trivial zero "
+        r"($s \neq -2, -4, -6, \dots$) and is not $s = 1$ has real part $\operatorname{Re}(s) = \frac{1}{2}$."),
+}
+
+
+def prop_name(d: Decl) -> str | None:
+    """If the statement is just a name (`theorem t : RiemannHypothesis`), that name."""
+    if len(d.type) == 1 and d.type[0].kind == "ident":
+        return d.type[0].text
+    return None
+
+
+def meanings(decls: list[Decl]) -> dict[str, Decl]:
+    """Project definitions whose value is a statement, by full and short name."""
+    out: dict[str, Decl] = {}
+    for d in decls:
+        if d.kind in ("def", "abbrev") and d.body and d.full_name and len(d.type) == 1 and d.type[0].text == "Prop":
+            out[d.full_name] = d
+            out.setdefault(d.full_name.rsplit(".", 1)[-1], d)
+    return out

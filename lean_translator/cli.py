@@ -104,7 +104,27 @@ _KIND = {"theorem": "Theorem", "lemma": "Lemma", "def": "Definition", "abbrev": 
          "example": "Example", "axiom": "Axiom", "opaque": "Definition"}
 
 
-def _book_file(path: str, root: str | None) -> tuple[str, int, dict]:
+def _meaning_texts(files: list[Path]) -> dict[str, str]:
+    """English meaning of every named statement (Prop definitions), for `Then RiemannHypothesis.`"""
+    from .proofs import KNOWN_PROPS, meanings
+
+    decls = []
+    for f in files:
+        try:
+            decls.extend(extract_decls(f.read_text(encoding="utf-8", errors="replace"), str(f)))
+        except Exception:
+            pass
+    out = {k: v[0] for k, v in KNOWN_PROPS.items()}
+    for name, d in meanings(decls).items():
+        try:
+            g = gloss_decl(d).gloss
+        except Exception:
+            continue
+        out[name] = re.sub(r"^\w+ [^:]+: ", "", g)
+    return out
+
+
+def _book_file(path: str, root: str | None, means: dict[str, str] | None = None) -> tuple[str, int, dict]:
     """One file as Markdown: every declaration's statement in English, then its proof steps."""
     from collections import Counter
 
@@ -125,6 +145,11 @@ def _book_file(path: str, root: str | None) -> tuple[str, int, dict]:
             short = d.full_name.rsplit(".", 1)[-1] if d.full_name else ""
             if statement and short:  # the title already names it
                 statement = re.sub(rf"^\w+ {re.escape(short)}: ", "", statement)
+            from .proofs import prop_name
+
+            pn = prop_name(d)
+            if statement and pn and means and (pn in means or pn.rsplit(".", 1)[-1] in means):
+                statement += f" Here, *{pn}* means: {means.get(pn) or means[pn.rsplit('.', 1)[-1]]}"
         except Exception:
             statement = None
         stats["decls"] += 1
@@ -147,8 +172,8 @@ def _book_file(path: str, root: str | None) -> tuple[str, int, dict]:
     return "\n".join(parts) + "\n", src.count("\n") + 1, dict(stats)
 
 
-def _book_many(paths: list[str], root: str | None):
-    return [_book_file(p, root) for p in paths]
+def _book_many(paths: list[str], root: str | None, means: dict[str, str] | None = None):
+    return [_book_file(p, root, means) for p in paths]
 
 
 def run_book(args: argparse.Namespace) -> None:
@@ -167,7 +192,8 @@ def run_book(args: argparse.Namespace) -> None:
             open(args.output, "w", encoding="utf-8") as out:
         out.write(f"# {args.title}\n\nTranslated from Lean by rules (no AI): every statement, and every proof "
                   "step by step.\n\n")
-        for res in ex.map(_book_many, batches, [root] * len(batches)):
+        means = _meaning_texts(files)
+        for res in ex.map(_book_many, batches, [root] * len(batches), [means] * len(batches)):
             for md, n, st in res:
                 out.write(md)
                 lines += n
