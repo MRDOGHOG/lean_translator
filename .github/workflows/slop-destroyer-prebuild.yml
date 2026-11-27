@@ -1,0 +1,93 @@
+# Build a big Lean project once and keep the result in GitHub's cache, so the
+# SLOP_DESTROYER workflows (verify / improve) start from a built project
+# instead of spending hours on the same baseline build.
+#
+# The build is resumable: if it hits the time limit, whatever finished is
+# still saved, and the next run of this workflow continues from there
+# (lake only rebuilds what isn't built yet).
+name: SLOP_DESTROYER prebuild
+
+on:
+  workflow_dispatch:
+    inputs:
+      repo:
+        default: lsernau/grh-lean
+      subdir:
+        default: grh-compact
+  push:
+    branches: [claude/optimistic-tesla-pw5s77]
+    paths: [".github/workflows/slop-destroyer-prebuild.yml"]
+
+permissions:
+  contents: read
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 350
+    env:
+      REPO: ${{ inputs.repo || 'lsernau/grh-lean' }}
+      SUBDIR: ${{ inputs.subdir || 'grh-compact' }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          repository: ${{ env.REPO }}
+          path: target
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Cache key
+        id: key
+        run: |
+          sha=$(git -C target rev-parse HEAD)
+          slug=$(echo "$REPO-$SUBDIR" | tr '/' '-')
+          echo "prefix=lake-build-$slug-$sha-" >> "$GITHUB_OUTPUT"
+
+      - name: Restore an earlier (possibly partial) build
+        uses: actions/cache/restore@v4
+        with:
+          path: target/${{ env.SUBDIR }}/.lake/build
+          key: ${{ steps.key.outputs.prefix }}${{ github.run_id }}
+          restore-keys: ${{ steps.key.outputs.prefix }}
+
+      - name: Install Lean (elan)
+        run: |
+          curl -sSfL https://raw.githubusercontent.com/leanprover/elan/master/elan-init.sh | sh -s -- -y --default-toolchain none
+          echo "$HOME/.elan/bin" >> "$GITHUB_PATH"
+
+      - name: Fetch Mathlib's prebuilt files
+        working-directory: target/${{ env.SUBDIR }}
+        run: if grep -qi mathlib lake-manifest.json 2>/dev/null; then lake exe cache get; fi
+
+      - name: Build (stops itself before the job limit so the cache still gets saved)
+        id: build
+        working-directory: target/${{ env.SUBDIR }}
+        continue-on-error: true
+        run: |
+          start=$(date +%s)
+          # show progress in the log every 10 minutes
+          ( while sleep 600; do echo "[progress] $(( ($(date +%s) - start) / 60 )) min, $(find .lake/build -name '*.olean' | wc -l) modules built"; done ) &
+          timeout 320m lake build 2>&1 | grep -vE "^(trace|info):" | tail -50
+          echo "build finished in $(( $(date +%s) - start ))s" | tee -a "$GITHUB_STEP_SUMMARY"
+
+      - name: Save the build (also when it was cut short)
+        if: always()
+        uses: actions/cache/save@v4
+        with:
+          path: target/${{ env.SUBDIR }}/.lake/build
+          key: ${{ steps.key.outputs.prefix }}${{ github.run_id }}
+
+      - name: Status
+        if: always()
+        working-directory: target/${{ env.SUBDIR }}
+        run: |
+          n=$(find .lake/build -name '*.olean' | wc -l)
+          total=$(find . -name '*.lean' -not -path './.lake/*' | wc -l)
+          echo "modules built: $n (project has $total .lean files)" | tee -a "$GITHUB_STEP_SUMMARY"
+          if [ "${{ steps.build.outcome }}" != "success" ]; then
+            echo "Build not finished yet: run this workflow again to continue from the cache." | tee -a "$GITHUB_STEP_SUMMARY"
+          fi
