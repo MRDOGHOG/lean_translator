@@ -26,11 +26,13 @@ import tempfile
 from collections import Counter, defaultdict
 from pathlib import Path
 
-from .graph import DUMP_SCRIPT, module_path
+from .graph import DUMP_SCRIPT, load_graph, module_path, reachable
 from .spans import split_commands
 
 # Attributes that generate other declarations from this one: aliasing would lose them.
 GENERATING = {"to_additive", "to_dual", "simps", "reassoc", "elementwise", "ext", "mk_iff", "simps!"}
+# Names Lean generates on demand (equation lemmas, auxiliary proofs): not real sources to alias to.
+_AUTO = re.compile(r"\.(eq_\d+|eq_def|eq_unfold|_sunfold|_unfold|proof_\d+|match_\d+|_simp_\d+|_proof_\d+)$|\._")
 
 
 def dump(root: Path, modules: list[str], prefixes: list[str], lean_cmd: list[str]) -> tuple[Path, Path]:
@@ -117,7 +119,17 @@ def run(args) -> None:
     root = Path(args.root).resolve()
     lean_cmd = args.lean.split()
     prefixes = args.prefix or [m.split(".")[0] for m in args.module]
-    _, fp = dump(root, args.module, prefixes, lean_cmd)
+    gpath, fp = dump(root, args.module, prefixes, lean_cmd)
+    graph = load_graph(gpath)
+    _closure: dict[str, set[str]] = {}
+
+    def depends_on(a: str, b: str) -> bool:
+        """Does a's statement or proof (transitively) use b?  Then `b := a` would be circular."""
+        if a not in graph:
+            return False  # library theorem: can't depend on project code
+        if a not in _closure:
+            _closure[a] = reachable(graph, [a])
+        return b in _closure[a]
     in_project = lambda mod: any(mod == p or mod.startswith(p + ".") for p in prefixes)
     gs = groups(fp, prefixes)
     keep = set(args.keep or [])
@@ -126,13 +138,25 @@ def run(args) -> None:
     plan: dict[str, str] = {}  # duplicate full name -> survivor full name
     stats = Counter()
     for g in gs:
+        g = [(n, m) for n, m in g if not _AUTO.search(n)]
         lib = sorted((n for n, m in g if not in_project(m)), key=len)
         proj = sorted((n, m) for n, m in g if in_project(m))
-        survivor = lib[0] if lib else proj[0][0]
-        stats["library re-proofs" if lib else "project duplicates"] += len([1 for n, _ in proj if n != survivor])
+        if not proj or len(g) < 2:
+            stats["auto-generated only"] += 1
+            continue
+        stats["library re-proofs" if lib else "project duplicates"] += len(proj) - (0 if lib else 1)
+        # Survivors: library theorems first, then project theorems that aren't built on the others.
+        candidates = lib + [n for n, _ in proj if not any(depends_on(n, o) for o, _ in proj if o != n)]
         for n, _ in proj:
-            if n != survivor and n not in keep and "_private" not in n:
-                plan[n] = survivor
+            if n in keep or "_private" in n:
+                continue
+            survivor = next((c for c in candidates if c != n and not depends_on(c, n)), None)
+            if survivor is None:
+                stats["skipped (circular)"] += 1
+                continue
+            if survivor in plan:  # don't alias to something that is itself becoming an alias
+                continue
+            plan[n] = survivor
     print(f"duplicate statements: {len(gs):,} groups; "
           + ", ".join(f"{k}: {v:,}" for k, v in stats.items()))
 
@@ -197,7 +221,11 @@ def run(args) -> None:
         _verify(root, originals, args.build.split(), args.rounds)
 
 
-_ERR_FILE = re.compile(r"(?:error: |^)([^\s:][^:]*\.lean):\d+:\d+: error", re.M)
+_ERR_FILE = re.compile(r"(?:^|\s)error: ([^\s:][^:\n]*\.lean):\d+:\d+:|^([^\s:][^:\n]*\.lean):\d+:\d+: error", re.M)
+
+
+def error_files(log: str) -> set[str]:
+    return {a or b for a, b in _ERR_FILE.findall(log)}
 
 
 def _verify(root: Path, originals: dict[Path, str], build: list[str], rounds: int) -> None:
@@ -206,7 +234,7 @@ def _verify(root: Path, originals: dict[Path, str], build: list[str], rounds: in
         if r.returncode == 0:
             print(f"[verify] build OK; {len(originals):,} changed files kept")
             return
-        bad = {(root / m).resolve() for m in _ERR_FILE.findall(r.stdout + r.stderr)} & set(originals)
+        bad = {(root / m).resolve() for m in error_files(r.stdout + r.stderr)} & set(originals)
         if not bad:
             print("[verify] build failed outside the edited files; reverting everything", file=sys.stderr)
             print((r.stdout + r.stderr)[-3000:], file=sys.stderr)

@@ -142,7 +142,11 @@ def plan_edits(text: str, warns: list[Warning_]) -> tuple[str, Counter]:
     return "\n".join(kept), done
 
 
-_ERR_FILE = re.compile(r"(?:error: |^)([^\s:][^:]*\.lean):\d+:\d+: error", re.M)
+_ERR_FILE = re.compile(r"(?:^|\s)error: ([^\s:][^:\n]*\.lean):\d+:\d+:|^([^\s:][^:\n]*\.lean):\d+:\d+: error", re.M)
+
+
+def error_files(log: str) -> set[str]:
+    return {a or b for a, b in _ERR_FILE.findall(log)}
 
 
 def run(args) -> None:
@@ -191,7 +195,7 @@ def run(args) -> None:
                 if r.returncode == 0:
                     print(f"[pass {pas}] build OK", flush=True)
                     break
-                bad = {(root / m).resolve() for m in _ERR_FILE.findall(r.stdout + r.stderr)}
+                bad = {(root / m).resolve() for m in error_files(r.stdout + r.stderr)}
                 bad &= set(originals)
                 if not bad:
                     print(f"[pass {pas}] build failed and the errors name no edited file; reverting this pass",

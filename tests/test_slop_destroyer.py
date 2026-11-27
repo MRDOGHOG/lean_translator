@@ -97,3 +97,21 @@ def test_lintfix_edits():
     new, done = plan_edits(src, warns)
     assert new == "theorem t : True := by\n  have used : True := trivial\n  exact used\n"
     assert done == {"unused_have": 1, "unused_tactic": 1}
+
+
+def test_error_formats_of_current_lean():
+    from slop_destroyer import graph, lintfix, redundant
+
+    log = ("✖ [9840/9843] Building New.Main (12s)\n"
+           "error: src/New/Main.lean:174:17: Unknown constant `_root_.LFunction_ne_zero_of_half_lt_re`\n"
+           "Foo/Bar.lean:3:4: error: unknown identifier 'helper'\n")
+    for mod in (lintfix, redundant):
+        assert mod.error_files(log) == {"src/New/Main.lean", "Foo/Bar.lean"}
+    assert set(graph._UNKNOWN.findall(log)) == {"LFunction_ne_zero_of_half_lt_re", "helper"}
+
+
+def test_redundant_never_aliases_to_a_dependent_or_generated_name():
+    from slop_destroyer.redundant import _AUTO
+
+    assert _AUTO.search("boxIndicator.eq_1") and _AUTO.search("foo.proof_2")
+    assert not _AUTO.search("boxIndicator_apply")

@@ -212,7 +212,7 @@ def apply(p: Plan) -> dict[Path, str]:
     return out
 
 
-_UNKNOWN = re.compile(r"unknown (?:identifier|constant|declaration) '([^']+)'")
+_UNKNOWN = re.compile(r"unknown (?:identifier|constant|declaration) ['`](?:_root_\.)?([^'`]+)['`]", re.I)
 
 
 def verify_and_repair(root: Path, p: Plan, originals: dict[Path, str], build_cmd: list[str], rounds: int) -> bool:
