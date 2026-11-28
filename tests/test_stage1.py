@@ -195,3 +195,12 @@ def test_polish_keeps_math_and_rejects_tampering():
     invented = Polisher("fake", chat=lambda s, u: "Here is [M1] [M2] [M3] [M4].")
     assert invented.statement(marked) is None
     assert not acceptable(masked, "Let $n$ be [M1] [M2] [M3]", table)  # raw math smuggled in
+
+
+def test_polish_rejects_invented_cases_and_filler():
+    from lean_translator.polish import acceptable, mask
+
+    masked, table = mask("This follows from \x03Thm\x04.")
+    assert acceptable(masked, "This follows directly from [R1].", table)
+    assert not acceptable(masked, "In the first case, this follows from [R1].", table)
+    assert not acceptable(masked, "This follows from [R1] and other pertinent findings.", table)

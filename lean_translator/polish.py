@@ -32,7 +32,9 @@ SYSTEM = (
 )
 STATEMENT_PROMPT = "Rewrite this theorem statement as it would appear in a paper:\n\n{text}"
 PROOF_PROMPT = ("Rewrite these proof steps as the proof in a paper: one or a few flowing paragraphs, no numbered "
-                "list. Keep the order of the steps; case splits may become 'In the first case, ...'.\n\n{text}")
+                "list. Keep the order of the steps. Be concise: no filler such as 'pertinent', 'established "
+                "results encapsulated in', 'it is worth noting'. Only mention cases if the steps say 'Case'."
+                "\n\n{text}")
 
 _SEG = re.compile("\x01(.*?)\x02|`([^`]+)`|\x03(.*?)\x04|\x05(.*?)\x06", re.S)
 _PH = re.compile(r"\[([MRK])(\d+)\]")
@@ -70,6 +72,11 @@ def acceptable(original: str, rewritten: str, table: dict[str, str]) -> bool:
         return False
     low = rewritten.lower()
     if low.startswith(("here is", "sure", "certainly", "rewritten")) or "placeholder" in low:
+        return False
+    # no invented structure: cases only if the original has them
+    if re.search(r"\b(first|second|third|other|remaining) case\b|\bin each case\b", low) and "case" not in original.lower():
+        return False
+    if any(w in low for w in ("pertinent", "encapsulated", "it is worth noting", "noteworthy")):
         return False
     return True
 

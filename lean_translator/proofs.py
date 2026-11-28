@@ -658,8 +658,11 @@ def narrate(d: Decl, g: Glosser | None = None, tex: bool = False) -> list[tuple[
         for s in steps:
             if s.bullet:
                 k += 1
-                out.append((depth, (f"Case {k}:" if n_bullets > 1 else "Then:") if s.children else ""))
-                walk(s.children, depth + 1)
+                if n_bullets > 1:
+                    out.append((depth, f"Case {k}:" if s.children else ""))
+                    walk(s.children, depth + 1)
+                else:  # one focused goal: no case split, keep the steps at this level
+                    walk(s.children, depth)
                 continue
             text = _sentence(s.toks, m)
             if text:

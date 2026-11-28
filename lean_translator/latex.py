@@ -401,6 +401,7 @@ def statement_tex(d: Decl) -> str:
 
 
 POLISHER = None  # set by write_book(polish=...): a polish.Polisher
+PAPER = False  # paper layout: no Uses / Used-by lines (the proofs cite what they use)
 
 
 # ---------------------------------------------------------------- document
@@ -584,7 +585,10 @@ def decl_tex(d: Decl, tactic_counts: Counter, proof_lengths: list[int], means: d
     if pn and means:
         meaning = means.get(pn) or means.get(pn.rsplit(".", 1)[-1])
         if meaning:
-            stmt += r" Here, \emph{%s} means: %s" % (esc(pn), meaning)
+            nice = {"RiemannHypothesis": "The Riemann Hypothesis"}.get(pn.rsplit(".", 1)[-1])
+            label = nice or r"\emph{%s}" % esc(pn.rsplit(".", 1)[-1])
+            meaning = re.sub(r"^\S+ holds when ", "", meaning)
+            stmt = r"%s holds; that is, %s" % (label, meaning)
     try:
         readable = gloss_name(name)
     except Exception:
@@ -596,10 +600,10 @@ def decl_tex(d: Decl, tactic_counts: Counter, proof_lengths: list[int], means: d
         head += r" \textit{(%s)}" % esc(readable)
     head += r"\hfill{\scriptsize\color{black!55}\leanc{%s}}" % esc_code(name)
     out = [r"\hypertarget{%s}{}%%" % anchor(name), r"\begin{leanbox}", head + r"\par\smallskip", stmt, r"\end{leanbox}"]
-    if uses:
+    if uses and not PAPER:
         out.append(r"\refsline{Uses}{%s}" % ", ".join(cite_tex(u) for u in uses[:10])
                    + (f", and {len(uses) - 10} more" if len(uses) > 10 else ""))
-    if used_by:
+    if used_by and not PAPER:
         out.append(r"\refsline{Used by}{%s}" % ", ".join(cite_tex(u) for u in used_by[:10])
                    + (f", and {len(used_by) - 10} more" if len(used_by) > 10 else ""))
     try:
@@ -673,8 +677,9 @@ def _set_refs(names: dict[str, str], by_name: dict[str, Decl]) -> None:
 
 def write_book(src_dir: str, output: str, title: str, first: list[str], headline: list[str],
                max_files: int = 0, tour: int = 0, polish: str = "", polish_cache: str = "",
-               polish_minutes: float = 0, ollama_host: str = "http://localhost:11434") -> dict:
-    global POLISHER
+               polish_minutes: float = 0, ollama_host: str = "http://localhost:11434", paper: bool = False) -> dict:
+    global POLISHER, PAPER
+    PAPER = paper
     if polish:
         from .polish import Polisher
 
@@ -802,8 +807,11 @@ def write_book(src_dir: str, output: str, title: str, first: list[str], headline
         r"\begin{itemize}",
         r"\item a shaded box with its kind and Lean name, a plain-English reading of the name on the right, "
         r"and the statement in English with the formulas typeset;",
+    ] + ([] if paper else [
         r"\item \textbf{Uses} and \textbf{Used by}: the other results it depends on and the ones that depend on "
         r"it. The \textcolor{linkblue}{blue names} are links: click to jump to that result;",
+    ]) + [
+        r"\item references to other results (\textcolor{linkblue}{Lemma 3.2}) are links: click to jump there;",
         r"\item the proof as numbered steps, one per Lean tactic; sub-steps (a), (b), \dots\ prove a claim made "
         r"in the step above, and each case of a case split is its own sub-list.",
         r"\end{itemize}",
