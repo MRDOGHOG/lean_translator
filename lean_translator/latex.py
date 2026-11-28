@@ -79,8 +79,8 @@ class _Tex:
 
     def name(self, ident: str) -> str:
         ident = ident.removeprefix("_root_.")
-        if ident == "_":  # placeholder, e.g. the left side of a calc step
-            return r"\qquad"
+        if ident == "_":  # an omitted argument; a calc step's "_ = ..." is handled by the narrator
+            return r"\cdot"
         if ident in _BB:
             return _BB[ident]
         if ident in _CONST:
