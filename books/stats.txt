@@ -1,4 +1,4 @@
-latex: 794 files, 400 declarations, 209 proofs (738 steps) -> ../../out/rh-tour.tex in 3.5s; headline theorems found: riemannHypothesis, riemannZeta_eq_zero_re, LFunction_ne_zero_of_half_lt_re, LFunction_eq_zero_re, LFunction_eq_zero_re_of_isPrimitive
-latex: 794 files, 10,944 declarations, 7,057 proofs (20,229 steps) -> ../../out/rh-full.tex in 8.9s; headline theorems found: riemannHypothesis, riemannZeta_eq_zero_re, LFunction_ne_zero_of_half_lt_re, LFunction_eq_zero_re, LFunction_eq_zero_re_of_isPrimitive
-rh-tour.pdf: 86 pages, 0 LaTeX errors, 135s
-rh-full.pdf: 2619 pages, 0 LaTeX errors, 367s
+latex: 794 files, 400 declarations, 209 proofs (738 steps) -> ../../out/rh-tour.tex in 3.1s; headline theorems found: riemannHypothesis, riemannZeta_eq_zero_re, LFunction_ne_zero_of_half_lt_re, LFunction_eq_zero_re, LFunction_eq_zero_re_of_isPrimitive
+latex: 794 files, 10,944 declarations, 7,057 proofs (20,229 steps) -> ../../out/rh-full.tex in 7.6s; headline theorems found: riemannHypothesis, riemannZeta_eq_zero_re, LFunction_ne_zero_of_half_lt_re, LFunction_eq_zero_re, LFunction_eq_zero_re_of_isPrimitive
+rh-tour.pdf: 86 pages, 0 LaTeX errors, 108s
+rh-full.pdf: 2617 pages, 0 LaTeX errors, 313s
